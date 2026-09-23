@@ -147,7 +147,7 @@ API (все пути под `/vapi-control/api/`, каждый запрос — 
 | Имя | Тип | Обязательна | Значение |
 | --- | --- | --- | --- |
 | `VAPI_API_KEY` | Secret | **да** | приватный ключ Vapi |
-| `TEAM_DOMAIN` | Variable | **да** | `https://<team>.cloudflareaccess.com` — источник ключей для проверки подписи JWT |
+| `TEAM_DOMAIN` | Variable | **да** | `https://<team>.cloudflareaccess.com` — источник ключей для проверки подписи JWT. Можно перечислить несколько через запятую; указывайте только те, что реально отдают `/cdn-cgi/access/certs` |
 | `POLICY_AUD` | Variable | рекомендуется | AUD-тег приложения Access (64 hex). Без неё подойдёт JWT **любого** приложения этой команды Access |
 | `ALLOWED_EMAILS` | Variable | рекомендуется | email(ы) операторов через запятую. Без неё пускает всех, кого пропустила политика Access |
 | `VAPI_ASSISTANT_ID` | Variable | нет | UUID — показывать/управлять только звонками этого ассистента |
@@ -157,6 +157,13 @@ API (все пути под `/vapi-control/api/`, каждый запрос — 
 Почему `TEAM_DOMAIN` нельзя опустить: по ней Worker берёт публичные ключи
 Cloudflare (`<team>/cdn-cgi/access/certs`). Если брать домен из самого токена,
 злоумышленник подставит свой домен со своими ключами и подпишет любой JWT сам.
+Поэтому Worker сначала сверяет `iss` со списком и только потом идёт за ключами.
+
+Текущие значения для этого аккаунта заданы в `wrangler.jsonc` (они не секретны —
+оба видны в публичном redirect'е на страницу входа):
+`TEAM_DOMAIN=https://kidletto.cloudflareaccess.com`,
+`POLICY_AUD=64d5dc8e…745d7`. Если задать те же имена переменных в дашборде,
+значения дашборда имеют приоритет.
 
 **kidletto-vapi-control-webhook**
 
@@ -239,17 +246,13 @@ kidletto.com обслуживался через Cloudflare:
    workers.dev → Enable Cloudflare Access.**
 3. **Manage Cloudflare Access** → политика `kidletto-vapi-control - Production` →
    Action **Allow**, Include → **Emails** → ваш email. Удалите прочие правила (Everyone и т. п.).
-4. Worker **kidletto-vapi-control → Settings → Variables and Secrets** → добавьте
-   переменную (Text) **`TEAM_DOMAIN`** = `https://<team>.cloudflareaccess.com` → **Deploy**.
-   Это единственная обязательная переменная.
-5. Рекомендуется добавить там же (Text):
-   - **`POLICY_AUD`** — Zero Trust → Access controls → Applications → приложение
-     `kidletto-vapi-control.geofakt.workers.dev` → Configure → Basic information →
-     **Application Audience (AUD) Tag** (64 hex);
-   - **`ALLOWED_EMAILS`** — ваш email.
-
-   Пока их нет, консоль работает, но показывает в шапке жёлтый значок
-   «Security notice» с пояснением, чего не хватает.
+4. **`TEAM_DOMAIN`** и **`POLICY_AUD`** для этого аккаунта уже прописаны в
+   `wrangler.jsonc`. Оба значения видны в публичном redirect'е на страницу входа:
+   домен — в `Location`, AUD — в параметре `kid`. Для другого аккаунта замените их
+   там же или задайте в дашборде (Settings → Variables and Secrets → Text).
+5. Рекомендуется добавить **`ALLOWED_EMAILS`** = ваш email (Text). Пока её нет,
+   консоль работает, но показывает в шапке жёлтый значок «Security notice».
+   Точный email своей Access-личности видно в шапке консоли после входа.
 6. **Не включайте Access** для `kidletto-vapi-control-webhook` — Vapi должен до него
    достучаться; он защищён собственным секретом.
 
@@ -311,6 +314,8 @@ npm run test:ui       # 16 проверок в headless Chrome (нужен Chrom
 | «Control panel not configured» (503) | не задана переменная `TEAM_DOMAIN` |
 | Жёлтый значок «Security notice» | не заданы `POLICY_AUD` и/или `ALLOWED_EMAILS` (наведите курсор — покажет, что именно) |
 | «Not authorized» (403) | email не в `ALLOWED_EMAILS` или AUD другого приложения |
+| Cloudflare Access: «That account does not have access.» | до Worker дело не дошло — не сошлась политика Access. Zero Trust → **Logs → Access** покажет, какой именно email пришёл и какая политика сработала. Обычно email в политике не совпадает с тем, что вернул способ входа |
+| На странице входа только «Sign in with: Cloudflare» | добавьте **One-time PIN**: Zero Trust → Settings → Authentication → Login methods → Add new → One-time PIN. Тогда код придёт на любой разрешённый email |
 | «Missing Cloudflare Access credentials» (401) | Access не включён на hostname — запрос пришёл в обход логина |
 | «Session expired» в консоли | перезагрузите страницу, войдите через Access |
 | «Vapi rejected the server API key» | неверный `VAPI_API_KEY` (нужен **private** key) |

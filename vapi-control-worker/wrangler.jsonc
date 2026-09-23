@@ -31,7 +31,18 @@
 
   "vars": {
     // Extra origins allowed to call the API cross-origin (exact match, no wildcards).
-    "ALLOWED_ORIGINS": "https://kidletto.com"
+    "ALLOWED_ORIGINS": "https://kidletto.com",
+
+    // Cloudflare Access. Neither value is a secret: both appear in the public
+    // login redirect. Several team names may be listed, comma separated — but
+    // list only names that actually serve /cdn-cgi/access/certs, since every
+    // entry is a trusted source of signing keys.
+    "TEAM_DOMAIN": "https://kidletto.cloudflareaccess.com",
+    // AUD tag of the "kidletto-vapi-control - Production" Access application.
+    "POLICY_AUD": "64d5dc8e5fe177c1bd85847ade324804bf5b2f4230eb4235f58e7395fad745d7"
+
+    // Add ALLOWED_EMAILS once the operator's Access identity is known, e.g.
+    // "ALLOWED_EMAILS": "you@example.com"
   },
 
   // Structured logs from the code only. Automatic invocation logs are off:

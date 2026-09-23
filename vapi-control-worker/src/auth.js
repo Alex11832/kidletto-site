@@ -40,6 +40,13 @@ export class AuthError extends Error {
   }
 }
 
+// TEAM_DOMAIN may list several origins (comma or whitespace separated).
+export function normalizeTeamDomains(value) {
+  return parseList(value)
+    .map(normalizeTeamDomain)
+    .filter((domain, index, all) => domain && all.indexOf(domain) === index);
+}
+
 export function normalizeTeamDomain(value) {
   let v = String(value || "").trim().replace(/\/+$/, "");
   if (!v) return null;
@@ -53,6 +60,9 @@ export function normalizeTeamDomain(value) {
   // Plain http is only tolerated for a local test identity provider.
   if (url.protocol !== "https:" && !(url.protocol === "http:" && LOCAL_HOSTS.has(url.hostname))) return null;
   if (url.pathname !== "/" && url.pathname !== "") return null;
+  // A real team domain is <team>.cloudflareaccess.com; requiring a dot stops a
+  // stray word in the list from silently becoming a trusted issuer.
+  if (!url.hostname.includes(".") && !LOCAL_HOSTS.has(url.hostname)) return null;
   return url.origin;
 }
 
@@ -111,7 +121,13 @@ export function _resetJwksCacheForTests() {
   jwksCache.clear();
 }
 
+// `teamDomain` may be a single origin or a list. A team can be reachable under
+// more than one name (Cloudflare's auto-generated name plus a renamed one), and
+// each serves its own signing keys, so every accepted issuer is listed
+// explicitly by the operator. The issuer is checked against that list *before*
+// any key is fetched, so keys are never loaded from a domain out of a token.
 export async function verifyAccessJwt(token, { teamDomain, audiences, nowMs = Date.now(), fetchImpl = fetch }) {
+  const issuers = (Array.isArray(teamDomain) ? teamDomain : [teamDomain]).filter(Boolean);
   const parts = String(token || "").split(".");
   if (parts.length !== 3) throw new AuthError(401, "invalid_token", "Malformed Access token.");
   let header;
@@ -124,7 +140,11 @@ export async function verifyAccessJwt(token, { teamDomain, audiences, nowMs = Da
   }
   if (header?.alg !== "RS256" || !header.kid) throw new AuthError(401, "invalid_token", "Unsupported Access token algorithm.");
 
-  const key = await getSigningKey(teamDomain, header.kid, fetchImpl);
+  // Trust the issuer first; only then is it allowed to supply signing keys.
+  const issuer = typeof payload.iss === "string" ? payload.iss.replace(/\/+$/, "") : "";
+  if (!issuers.includes(issuer)) throw new AuthError(401, "invalid_token", "Access token issuer mismatch.");
+
+  const key = await getSigningKey(issuer, header.kid, fetchImpl);
   if (!key) throw new AuthError(401, "invalid_token", "Access token signed with an unknown key.");
 
   const signature = base64UrlToBytes(parts[2]);
@@ -133,7 +153,6 @@ export async function verifyAccessJwt(token, { teamDomain, audiences, nowMs = Da
   if (!valid) throw new AuthError(401, "invalid_token", "Access token signature is invalid.");
 
   const now = Math.floor(nowMs / 1000);
-  if (payload.iss !== teamDomain) throw new AuthError(401, "invalid_token", "Access token issuer mismatch.");
   // An empty `audiences` means POLICY_AUD was left unset: every application of
   // this Access team is then accepted (configWarnings reports it).
   const tokenAud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
@@ -158,8 +177,8 @@ export function isDevBypassAllowed(request, env) {
 export async function authenticate(request, env, { fetchImpl = fetch } = {}) {
   if (isDevBypassAllowed(request, env)) return { email: "local-dev@localhost", dev: true };
 
-  const teamDomain = normalizeTeamDomain(env.TEAM_DOMAIN);
-  if (!teamDomain) {
+  const teamDomains = normalizeTeamDomains(env.TEAM_DOMAIN);
+  if (teamDomains.length === 0) {
     throw new AuthError(
       503,
       "access_not_configured",
@@ -172,7 +191,7 @@ export async function authenticate(request, env, { fetchImpl = fetch } = {}) {
   const token = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!token) throw new AuthError(401, "unauthenticated", "Missing Cloudflare Access credentials.");
 
-  const claims = await verifyAccessJwt(token, { teamDomain, audiences, fetchImpl });
+  const claims = await verifyAccessJwt(token, { teamDomain: teamDomains, audiences, fetchImpl });
   const email = typeof claims.email === "string" ? claims.email.toLowerCase() : "";
   if (!email) throw new AuthError(403, "forbidden", "A user identity is required (service tokens are not accepted).");
   if (allowedEmails.length > 0 && !allowedEmails.includes(email)) {
@@ -186,7 +205,7 @@ export async function authenticate(request, env, { fetchImpl = fetch } = {}) {
 export function configWarnings(env) {
   const warnings = [];
   if (isDevBypassEnabled(env)) warnings.push("DEV_AUTH_BYPASS is on: requests to localhost skip the Access check.");
-  if (!normalizeTeamDomain(env.TEAM_DOMAIN)) return warnings;
+  if (normalizeTeamDomains(env.TEAM_DOMAIN).length === 0) return warnings;
   if (parseList(env.POLICY_AUD).length === 0) {
     warnings.push("POLICY_AUD is not set: any Cloudflare Access application of this team can reach the panel.");
   }

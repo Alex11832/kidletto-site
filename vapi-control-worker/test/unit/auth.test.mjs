@@ -1,13 +1,15 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { authenticate, configWarnings, normalizeTeamDomain, verifyAccessJwt, _resetJwksCacheForTests } from "../../src/auth.js";
+import { authenticate, configWarnings, normalizeTeamDomain, normalizeTeamDomains, verifyAccessJwt, _resetJwksCacheForTests } from "../../src/auth.js";
 import { createTestIdp } from "../helpers/jwt.mjs";
 
 const TEAM = "https://example-team.cloudflareaccess.com";
 const AUD = "a".repeat(64);
 const idp = await createTestIdp();
+const jwksRequests = [];
 const jwksFetch = async (url) => {
-  assert.equal(url, `${TEAM}/cdn-cgi/access/certs`);
+  jwksRequests.push(String(url));
+  assert.match(String(url), /\/cdn-cgi\/access\/certs$/);
   return new Response(JSON.stringify(idp.jwks), { headers: { "Content-Type": "application/json" } });
 };
 const env = { TEAM_DOMAIN: TEAM, POLICY_AUD: AUD, ALLOWED_EMAILS: "operator@example.com, second@example.com" };
@@ -120,10 +122,33 @@ test("team domain normalization rejects non-https (except localhost)", () => {
   assert.equal(normalizeTeamDomain("http://example-team.cloudflareaccess.com"), null);
   assert.equal(normalizeTeamDomain("https://x.cloudflareaccess.com/path"), null);
   assert.equal(normalizeTeamDomain("http://127.0.0.1:9999"), "http://127.0.0.1:9999");
+  // A bare word must not become a trusted issuer.
+  assert.equal(normalizeTeamDomain("not"), null);
+  assert.deepEqual(normalizeTeamDomains("not a url"), []);
 });
 
 test("verifyAccessJwt accepts aud given as a string", async () => {
   const token = await idp.sign({ ...idp.claimsFor({ teamDomain: TEAM, aud: AUD, email: "operator@example.com" }), aud: AUD });
   const claims = await verifyAccessJwt(token, { teamDomain: TEAM, audiences: [AUD], fetchImpl: jwksFetch });
   assert.equal(claims.email, "operator@example.com");
+});
+
+test("TEAM_DOMAIN accepts several team names; keys come from the token's own issuer", async () => {
+  const ALT = "https://plain-lake-24f1.cloudflareaccess.com";
+  const multi = { ...env, TEAM_DOMAIN: `${TEAM}, ${ALT}` };
+  assert.deepEqual(normalizeTeamDomains(multi.TEAM_DOMAIN), [TEAM, ALT]);
+  for (const issuer of [TEAM, ALT]) {
+    _resetJwksCacheForTests();
+    jwksRequests.length = 0;
+    const token = await idp.sign(idp.claimsFor({ teamDomain: issuer, aud: AUD, email: "operator@example.com" }));
+    const identity = await authenticate(req(token), multi, { fetchImpl: jwksFetch });
+    assert.equal(identity.email, "operator@example.com");
+    assert.deepEqual(jwksRequests, [`${issuer}/cdn-cgi/access/certs`]);
+  }
+  // An issuer outside the list is refused, and its keys are never fetched.
+  _resetJwksCacheForTests();
+  jwksRequests.length = 0;
+  const evil = await idp.sign(idp.claimsFor({ teamDomain: "https://evil.cloudflareaccess.com", aud: AUD, email: "operator@example.com" }));
+  await assert.rejects(authenticate(req(evil), multi, { fetchImpl: jwksFetch }), { status: 401, code: "invalid_token" });
+  assert.deepEqual(jwksRequests, [], "keys must not be fetched from an untrusted issuer");
 });
