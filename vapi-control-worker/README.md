@@ -314,7 +314,7 @@ npm run test:ui       # 16 проверок в headless Chrome (нужен Chrom
 | «Control panel not configured» (503) | не задана переменная `TEAM_DOMAIN` |
 | Жёлтый значок «Security notice» | не заданы `POLICY_AUD` и/или `ALLOWED_EMAILS` (наведите курсор — покажет, что именно) |
 | «Not authorized» (403) | email не в `ALLOWED_EMAILS` или AUD другого приложения |
-| Cloudflare Access: «That account does not have access.» | до Worker дело не дошло — не сошлась политика Access. Zero Trust → **Logs → Access** покажет, какой именно email пришёл и какая политика сработала. Обычно email в политике не совпадает с тем, что вернул способ входа |
+| Cloudflare Access: «That account does not have access.» | до Worker дело не дошло — не сошлась политика Access. Частая причина: в правиле выбран селектор **Emails ending in** (домен), а вписан полный адрес — Cloudflare превращает это в `@you@example.com`, что не совпадает ни с чем. Нужен селектор **Emails** с точным адресом. Проверить: Zero Trust → Access controls → Applications → приложение → **Policy tester**, он покажет, какое правило не сошлось |
 | На странице входа только «Sign in with: Cloudflare» | добавьте **One-time PIN**: Zero Trust → Settings → Authentication → Login methods → Add new → One-time PIN. Тогда код придёт на любой разрешённый email |
 | «Missing Cloudflare Access credentials» (401) | Access не включён на hostname — запрос пришёл в обход логина |
 | «Session expired» в консоли | перезагрузите страницу, войдите через Access |
