@@ -365,11 +365,12 @@ await check("DTMF keypad is disabled and labelled NOT SUPPORTED when the assista
   assert.equal(await js("document.getElementById('dtmfSend').disabled"), true);
 });
 
-await check("LISTEN: connects, auto-detects PCM format, survives a dropped stream, STOP cleans up; no microphone", async () => {
-  await until(`!document.getElementById('listenBtn').disabled`);
-  await click("listenBtn");
-  await until(`document.getElementById('audioState').dataset.state === 'connected'`);
+await check("LISTEN starts by itself once the page was clicked, shows what arrives, survives a drop, STOP cleans up; no microphone", async () => {
+  // Sound was unlocked by the earlier key press: listening is already on.
+  await until(`document.getElementById('audioState').dataset.state === 'connected'`, { what: "auto-started listening" });
+  assert.equal(await text("listenBtn"), "STOP LISTENING");
   await until(`document.getElementById('audioFormatInfo').textContent.includes('16 kHz mono')`, { timeout: 8000, what: "format detection" });
+  assert.match(await text("audioFormatInfo"), /\d+ KB received/);
   assert.equal(await text("listenBtn"), "STOP LISTENING");
   mock.dropListen(C1);
   await until(`['reconnecting','connecting'].includes(document.getElementById('audioState').dataset.state)`, { timeout: 4000 });
@@ -420,9 +421,8 @@ await check("END CALL asks for confirmation; Cancel sends nothing; End Call ends
 });
 
 await check("remote hang-up (webhook status-update) is detected -> CALL ENDED -> NO ACTIVE CALL", async () => {
-  await until(`!document.getElementById('listenBtn').disabled`, { what: "LISTEN enabled once call details load" });
-  await click("listenBtn");
-  await until(`document.getElementById('audioState').dataset.state === 'connected'`);
+  // Re-selected call: listening starts again on its own.
+  await until(`document.getElementById('audioState').dataset.state === 'connected'`, { what: "auto-listen on the re-selected call" });
   mock.endCall(C1, "customer-ended-call");
   await webhook({ type: "status-update", status: "ended", endedReason: "customer-ended-call", call: { id: C1 }, timestamp: Date.now() });
   await until(`document.getElementById('callStateText').textContent === 'CALL ENDED'`, { timeout: 4000 });
@@ -474,6 +474,27 @@ await check("no uncaught JavaScript exceptions; no secrets in the page", async (
   assert.ok(!html.includes(FAKE_VAPI_KEY));
   const storage = await js("JSON.stringify(Object.assign({}, localStorage))");
   assert.ok(!storage.includes(FAKE_VAPI_KEY) && !storage.includes(TOKEN), "no credentials in localStorage");
+});
+
+await check("quick phrases can be added, edited and deleted, and are saved on the server", async () => {
+  await click("editPhrases");
+  await until(`document.getElementById('phraseDialog').open`);
+  const before = await js(`document.querySelectorAll('#phraseRows .phrase-row').length`);
+  assert.equal(before, 5, "defaults from config.js");
+  // delete the first, edit the second, add one
+  await js(`document.querySelector('#phraseRows .phrase-row .del').click()`);
+  await js(`(() => { const r = document.querySelectorAll('#phraseRows .phrase-row')[0]; r.querySelector('[data-field=label]').value = 'Edited'; r.querySelector('[data-field=text]').value = 'Edited line.'; })()`);
+  await click("phraseAdd");
+  await js(`(() => { const rows = document.querySelectorAll('#phraseRows .phrase-row'); const r = rows[rows.length - 1]; r.querySelector('[data-field=label]').value = 'Callback'; r.querySelector('[data-field=text]').value = 'Can I call you back in ten minutes?'; })()`);
+  await click("phraseSave");
+  await until(`!document.getElementById('phraseDialog').open`);
+  const labels = await js(`[...document.querySelectorAll('#quickPhrases button')].map(b => b.textContent)`);
+  assert.equal(labels[0], "Edited");
+  assert.ok(labels.includes("Callback"));
+  assert.ok(!labels.includes("What's the total?"));
+  // saved server-side: a fresh page load shows the same list
+  await send("Page.reload");
+  await until(`[...document.querySelectorAll('#quickPhrases button')].some(b => b.textContent === 'Callback')`, { timeout: 10000 });
 });
 
 await check("phone-width layout has no horizontal scroll", async () => {

@@ -97,6 +97,11 @@ function callStateError(call) {
 // operator gets "call ended" instead of a generic error.
 async function explainControlFailure(client, env, callId, error) {
   if (error?.code !== "control_rejected" && error?.code !== "vapi_unreachable" && error?.code !== "vapi_timeout") return error;
+  // Vapi's control server answers 400 "Call ... Not Active" once a call has
+  // ended, sometimes before GET /call reports it: that is "call ended".
+  if (error.code === "control_rejected" && /not active/i.test(error.message)) {
+    return new HttpError(409, "call_ended", "The call has already ended.", { status: "ended", endedReason: null });
+  }
   try {
     const call = await client.getCall(callId);
     if (call && call.status !== CONTROLLABLE_STATUS) return callStateError(call);
@@ -139,6 +144,27 @@ async function handleApi(request, env, identity, subpath) {
     if (!env.HUB) throw new HttpError(503, "events_unavailable", "Live events are not configured.");
     const stub = env.HUB.get(env.HUB.idFromName("hub"));
     return stub.fetch(request);
+  }
+
+  if (subpath === "/phrases") {
+    if (!env.HUB) throw new HttpError(503, "events_unavailable", "Storage is not configured.");
+    const hub = env.HUB.get(env.HUB.idFromName("hub"));
+    if (method === "GET") {
+      const res = await hub.fetch("https://hub.internal/__hub/phrases");
+      return json({ ok: true, ...(await res.json()) });
+    }
+    if (method === "PUT") {
+      assertOrigin(request, env);
+      const phrases = validatePhrases((await readJsonBody(request)).phrases);
+      await hub.fetch("https://hub.internal/__hub/phrases", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phrases }),
+      });
+      log("quick_phrases_saved", { count: phrases.length, by: identity.email });
+      return json({ ok: true, phrases });
+    }
+    throw new HttpError(405, "method_not_allowed", "Method not allowed.");
   }
 
   const client = createVapiClient(env);
@@ -276,6 +302,22 @@ async function handleApi(request, env, identity, subpath) {
   }
 
   throw new HttpError(404, "not_found", "Unknown API endpoint.");
+}
+
+const PHRASE_ACTIONS = new Set(["say", "say-and-hang-up"]);
+
+// Quick phrases edited in the console: a short list of labelled lines.
+function validatePhrases(input) {
+  if (!Array.isArray(input)) throw new HttpError(400, "invalid_phrases", "phrases must be a list.");
+  if (input.length > 40) throw new HttpError(400, "invalid_phrases", "At most 40 quick phrases.");
+  return input.map((p, i) => {
+    const text = typeof p?.text === "string" ? p.text.trim() : "";
+    const label = typeof p?.label === "string" ? p.label.trim() : "";
+    const action = PHRASE_ACTIONS.has(p?.action) ? p.action : "say";
+    if (!text) throw new HttpError(400, "invalid_phrases", `Phrase ${i + 1} has no text.`);
+    if (text.length > MAX_SAY_CHARS || label.length > 60) throw new HttpError(400, "invalid_phrases", `Phrase ${i + 1} is too long.`);
+    return { label: label || text.slice(0, 40), text, action, confirm: action === "say-and-hang-up" };
+  });
 }
 
 function errorPage(status, title, message) {

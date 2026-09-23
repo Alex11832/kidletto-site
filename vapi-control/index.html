@@ -22,7 +22,7 @@
     <div class="timer" id="timer" aria-label="Call duration">--:--</div>
     <div class="meta">
       <span class="pill" id="eventsPill" data-state="offline" title="Live transcript/event stream">Events: offline</span>
-      <button type="button" class="pill bell" id="enableNotify" hidden title="Allow desktop notifications for incoming calls">🔔 Notify me</button>
+      <button type="button" class="pill bell" id="enableNotify" hidden title="Browsers only allow sound after one click on the page. Also allows desktop notifications.">🔊 Enable sound &amp; alerts</button>
       <span class="pill warn" id="configWarning" hidden></span>
       <span class="user" id="userEmail"></span>
     </div>
@@ -124,7 +124,7 @@
       </div>
 
       <div class="group">
-        <div class="group-head"><span>QUICK PHRASES</span></div>
+        <div class="group-head"><span>QUICK PHRASES</span><button type="button" class="link" id="editPhrases">Edit</button></div>
         <div class="phrases" id="quickPhrases"></div>
       </div>
 
@@ -133,6 +133,20 @@
   </main>
 
   <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+  <dialog id="phraseDialog" class="dialog wide" aria-labelledby="phraseDialogTitle">
+    <h2 id="phraseDialogTitle">Quick phrases</h2>
+    <p class="muted">Saved on the server, so every browser you use sees the same list. Write them in English — they are spoken word for word.</p>
+    <div class="phrase-rows" id="phraseRows"></div>
+    <div class="row">
+      <button type="button" class="btn" id="phraseAdd">+ Add phrase</button>
+      <button type="button" class="btn" id="phraseReset">Reset to defaults</button>
+    </div>
+    <div class="row right">
+      <button type="button" class="btn" id="phraseCancel">Cancel</button>
+      <button type="button" class="btn primary" id="phraseSave">Save</button>
+    </div>
+  </dialog>
 
   <dialog id="endDialog" class="dialog" aria-labelledby="endDialogTitle">
     <h2 id="endDialogTitle">End this call?</h2>

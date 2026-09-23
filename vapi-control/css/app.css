@@ -71,6 +71,16 @@ code { font-family: var(--mono); }
 .pill.warn { color: var(--amber); border-color: rgba(243, 178, 60, 0.5); cursor: help; }
 .pill.bell { background: none; cursor: pointer; font: inherit; font-size: 11px; }
 .pill.bell:hover { color: var(--accent); border-color: var(--accent); }
+.pill.bell.attention { color: #041222; background: var(--amber); border-color: var(--amber); animation: pulse-amber 1.4s infinite; }
+@keyframes pulse-amber { 50% { opacity: 0.55; } }
+.link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 11px; letter-spacing: 0.04em; padding: 0; }
+.link:hover { text-decoration: underline; }
+.dialog.wide { width: min(720px, calc(100vw - 32px)); }
+.phrase-rows { display: grid; gap: 8px; margin: 10px 0; max-height: 55vh; overflow-y: auto; }
+.phrase-row { display: grid; grid-template-columns: 1fr 2fr auto auto; gap: 6px; align-items: start; }
+.phrase-row input, .phrase-row select { width: 100%; background: #0d1117; border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; }
+.phrase-row .del { padding: 7px 10px; }
+@media (max-width: 860px) { .phrase-row { grid-template-columns: 1fr; } }
 
 /* Operator mode: the whole console turns amber while the human is driving. */
 body.manual-mode .controls-panel { box-shadow: inset 0 0 0 1px rgba(243, 178, 60, 0.45); }

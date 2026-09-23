@@ -18,6 +18,7 @@ const RETAIN_STALE_MS = 6 * 60 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const KEY_PREFIX = "call:";
 export const INGEST_PATH = "/__hub/ingest";
+const PHRASES_PATH = "/__hub/phrases";
 
 function emptyState(callId, at) {
   return {
@@ -59,6 +60,16 @@ export class CallHub extends DurableObject {
     // Internal ingest call from the webhook Worker (via its DO binding; not
     // reachable from browsers: the control Worker only forwards GET upgrades
     // of /vapi-control/api/events here).
+    // Quick phrases saved from the console (reached only through the control
+    // Worker's authenticated /api/phrases).
+    if (new URL(request.url).pathname === PHRASES_PATH) {
+      if (request.method === "PUT") {
+        const { phrases } = await request.json();
+        await this.ctx.storage.put("settings:phrases", phrases);
+        return Response.json({ ok: true });
+      }
+      return Response.json({ phrases: (await this.ctx.storage.get("settings:phrases")) ?? null });
+    }
     if (request.method === "POST" && new URL(request.url).pathname === INGEST_PATH) {
       let event = null;
       try {

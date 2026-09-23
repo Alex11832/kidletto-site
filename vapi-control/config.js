@@ -105,8 +105,10 @@ window.VAPI_CONTROL_CONFIG = {
     clearAfterSend: true,
   },
 
-  // QUICK PHRASES. action: "say" or "say-and-hang-up".
-  // confirm: true requires a second click within 3 s (protects hang-ups).
+  // QUICK PHRASES — defaults only. Edit them in the console (QUICK PHRASES →
+  // Edit); the edited list is saved on the server and replaces these.
+  // action: "say" or "say-and-hang-up". confirm: true requires a second click
+  // within 3 s (protects hang-ups).
   quickPhrases: [
     { label: "What's the total?", text: "What's the total price?", action: "say" },
     { label: "Think", text: "I'll think about it.", action: "say" },
@@ -132,5 +134,8 @@ window.VAPI_CONTROL_CONFIG = {
   listen: {
     defaultFormat: "auto",
     volume: 1.0,
+    // Start LISTEN automatically for every selected call. Browsers still need
+    // one click on the page per session before any sound may play.
+    autoStart: true,
   },
 };

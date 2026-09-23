@@ -33,7 +33,7 @@ const DEFAULTS = {
   aiInstruction: { template: "{instruction}", clearAfterSend: true },
   quickPhrases: [],
   dtmf: { pauseBetweenDigits: "w", sendOnPress: false, maxLength: 32 },
-  listen: { defaultFormat: "auto", volume: 1 },
+  listen: { defaultFormat: "auto", volume: 1, autoStart: true },
 };
 
 function mergeConfig(base, extra) {
@@ -104,6 +104,10 @@ const state = {
   notifiedCalls: new Set(),
   remute: null, // { callId, timer } while an operator line is being spoken
   fetchingCalls: new Set(),
+  // Browsers allow audio only after the operator has clicked the page once.
+  audioUnlocked: false,
+  sharedAudio: null,
+  phrases: null, // null = config defaults; else the list saved on the server
 };
 if (!(state.audioFormatKey in FORMAT_PRESETS)) state.audioFormatKey = "auto";
 
@@ -113,6 +117,13 @@ const el = {
   timer: $("timer"),
   eventsPill: $("eventsPill"),
   enableNotify: $("enableNotify"),
+  editPhrases: $("editPhrases"),
+  phraseDialog: $("phraseDialog"),
+  phraseRows: $("phraseRows"),
+  phraseAdd: $("phraseAdd"),
+  phraseReset: $("phraseReset"),
+  phraseCancel: $("phraseCancel"),
+  phraseSave: $("phraseSave"),
   configWarning: $("configWarning"),
   userEmail: $("userEmail"),
   modeState: $("modeState"),
@@ -283,6 +294,7 @@ async function refreshCaps(announce) {
     if (state.selectedId !== id) return;
     state.caps = data.capabilities;
     state.capsStatus = data.call.status;
+    maybeAutoListen();
     const index = state.calls.findIndex((c) => c.id === id);
     if (index >= 0) state.calls[index] = { ...state.calls[index], ...data.call };
     if (data.call.status === "ended") callEnded(id, data.call.endedReason);
@@ -376,30 +388,61 @@ async function fetchCallById(callId) {
 // Short two-tone chime, synthesised so the page needs no audio file and no
 // extra request. Browsers only allow this after the operator has interacted
 // with the page, which the notification permission button takes care of.
-function playChime() {
-  if (!cfg.notify.sound) return;
-  try {
+function sharedAudio() {
+  if (!state.sharedAudio) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new Ctx();
-    const now = ctx.currentTime;
-    [880, 1320].forEach((freq, index) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = "sine";
-      osc.frequency.value = freq;
-      const start = now + index * 0.18;
-      gain.gain.setValueAtTime(0.0001, start);
-      gain.gain.exponentialRampToValueAtTime(0.25, start + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(start);
-      osc.stop(start + 0.18);
-    });
-    setTimeout(() => ctx.close().catch(() => {}), 800);
+    state.sharedAudio = new Ctx();
+  }
+  return state.sharedAudio;
+}
+
+// Browsers block sound until the page has been clicked once. The first click
+// anywhere (or the "Enable sound" button) unlocks it for the whole session.
+function unlockAudio() {
+  if (state.audioUnlocked) return;
+  try {
+    const ctx = sharedAudio();
+    ctx.resume().catch(() => {});
+    state.audioUnlocked = true;
+  } catch {
+    return;
+  }
+  renderNotifyButton();
+  maybeAutoListen();
+}
+
+// Ring-like chime: two bursts of a two-tone ring, loud enough to hear from
+// across the room.
+function playChime() {
+  if (!cfg.notify.sound || !state.audioUnlocked) return;
+  try {
+    const ctx = sharedAudio();
+    const now = ctx.currentTime + 0.02;
+    for (let burst = 0; burst < 2; burst++) {
+      for (let i = 0; i < 6; i++) {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "triangle";
+        osc.frequency.value = i % 2 ? 1175 : 880;
+        const start = now + burst * 1.1 + i * 0.09;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.6, start + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.085);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(start);
+        osc.stop(start + 0.09);
+      }
+    }
   } catch {
     // Audio unavailable; the visual cues still fire.
   }
+}
+
+// "Sound always on": start LISTEN by itself whenever a call is selected.
+function maybeAutoListen() {
+  if (!cfg.listen.autoStart || !state.audioUnlocked || state.listen) return;
+  if (state.selectedId && state.caps?.listen && !state.fatal) toggleListen();
 }
 
 function announceCall(call) {
@@ -429,18 +472,22 @@ function updateTitle() {
 }
 
 async function askNotifyPermission() {
-  if (!window.Notification) return;
-  try {
-    await Notification.requestPermission();
-  } catch {
-    // Older browsers use the callback form; ignore.
+  unlockAudio();
+  if (window.Notification && cfg.notify.desktop && Notification.permission === "default") {
+    try {
+      await Notification.requestPermission();
+    } catch {
+      // Older browsers use the callback form; ignore.
+    }
   }
   renderNotifyButton();
 }
 
 function renderNotifyButton() {
-  const supported = Boolean(window.Notification);
-  el.enableNotify.hidden = !supported || !cfg.notify.desktop || Notification.permission !== "default";
+  const notifyPending = Boolean(window.Notification) && cfg.notify.desktop && Notification.permission === "default";
+  el.enableNotify.hidden = state.audioUnlocked && !notifyPending;
+  // A call is waiting and it is silent: make the button impossible to miss.
+  el.enableNotify.classList.toggle("attention", !state.audioUnlocked && state.calls.length > 0);
 }
 
 // ------------------------------------------------------------ event stream --
@@ -748,6 +795,7 @@ async function confirmEnd() {
 // --------------------------------------------------------------- rendering --
 
 function render() {
+  renderNotifyButton();
   updateTitle();
   renderMode();
   renderHeader();
@@ -785,7 +833,22 @@ function renderHeader() {
   tick();
 }
 
+// What the listen stream is actually doing — tells "nothing arrives" apart
+// from "arrives but is not played".
+function audioDiagnostics() {
+  const stats = state.listen?.player.stats();
+  if (!stats) return "";
+  const kb = (stats.bytesReceived / 1024).toFixed(0);
+  if (state.audioState === "connected" && stats.bytesReceived === 0) return "connected, no audio arriving yet";
+  const parts = [`${kb} KB received`];
+  if (stats.format) parts.push(describeFormat(stats.format) + (stats.format.source === "auto" ? " (auto)" : ""));
+  else if (stats.bytesReceived > 0) parts.push("detecting format…");
+  if (stats.contextState !== "running") parts.push(`audio ${stats.contextState} — click the page`);
+  return parts.join(" · ");
+}
+
 function tick() {
+  if (state.listen) el.audioFormatInfo.textContent = audioDiagnostics();
   const call = selectedCall();
   const elapsed = call ? callElapsedMs(call, Date.now(), state.skewMs) : null;
   el.timer.textContent = elapsed === null ? "--:--" : formatDuration(elapsed);
@@ -943,7 +1006,7 @@ function renderAudio() {
     el.audioState.dataset.state = "error";
     el.audioState.textContent = call.listenAvailable ? "Unavailable for this call" : "Listening disabled in Vapi (no listen URL)";
   }
-  el.audioFormatInfo.textContent = listening && state.audioFormat ? describeFormat(state.audioFormat) + (state.audioFormat.source === "auto" ? " (auto)" : "") : "";
+  el.audioFormatInfo.textContent = listening ? audioDiagnostics() : "";
 }
 
 function renderEventsPill() {
@@ -1054,8 +1117,12 @@ function renderTranscript() {
   }
 }
 
+function currentPhrases() {
+  return Array.isArray(state.phrases) ? state.phrases : Array.isArray(cfg.quickPhrases) ? cfg.quickPhrases : [];
+}
+
 function renderQuickPhrases() {
-  const phrases = Array.isArray(cfg.quickPhrases) ? cfg.quickPhrases : [];
+  const phrases = currentPhrases();
   const buttons = phrases
     .filter((p) => p && typeof p.text === "string" && p.text.trim())
     .map((phrase) => {
@@ -1114,6 +1181,14 @@ function bindUi() {
   el.translateSay.checked = Boolean(cfg.say.translate.enabledByDefault);
   el.translateLang.textContent = cfg.say.translate.targetLanguage;
   el.modeBtn.addEventListener("click", toggleOperatorMode);
+  // Any click or key press on the page unlocks sound for the session.
+  document.addEventListener("pointerdown", unlockAudio, { capture: true });
+  document.addEventListener("keydown", unlockAudio, { capture: true });
+  el.editPhrases.addEventListener("click", openPhraseEditor);
+  el.phraseAdd.addEventListener("click", () => el.phraseRows.appendChild(phraseRow({ label: "", text: "", action: "say" })));
+  el.phraseReset.addEventListener("click", () => fillPhraseEditor(cfg.quickPhrases || []));
+  el.phraseCancel.addEventListener("click", () => el.phraseDialog.close());
+  el.phraseSave.addEventListener("click", savePhrases);
   el.enableNotify.addEventListener("click", askNotifyPermission);
   renderNotifyButton();
   el.sayText.addEventListener("input", renderControls);
@@ -1205,6 +1280,86 @@ async function init() {
   }
   render();
   poll();
+  loadPhrases();
+}
+
+// ----------------------------------------------------------- phrase editor --
+
+async function loadPhrases() {
+  try {
+    const data = await api.phrases();
+    if (Array.isArray(data.phrases)) {
+      state.phrases = data.phrases;
+      renderQuickPhrases();
+      renderControls();
+    }
+  } catch {
+    // Keep the defaults from config.js.
+  }
+}
+
+function phraseRow(phrase) {
+  const row = document.createElement("div");
+  row.className = "phrase-row";
+  const label = document.createElement("input");
+  label.placeholder = "Button label";
+  label.maxLength = 60;
+  label.value = phrase.label || "";
+  label.dataset.field = "label";
+  const text = document.createElement("input");
+  text.placeholder = "What the assistant says (English)";
+  text.maxLength = 1000;
+  text.value = phrase.text || "";
+  text.dataset.field = "text";
+  const action = document.createElement("select");
+  action.dataset.field = "action";
+  for (const [value, title] of [["say", "Say"], ["say-and-hang-up", "Say & hang up"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = title;
+    action.appendChild(option);
+  }
+  action.value = phrase.action === "say-and-hang-up" ? "say-and-hang-up" : "say";
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "btn danger del";
+  del.textContent = "✕";
+  del.title = "Delete";
+  del.addEventListener("click", () => row.remove());
+  row.append(label, text, action, del);
+  return row;
+}
+
+function fillPhraseEditor(phrases) {
+  el.phraseRows.replaceChildren(...phrases.map(phraseRow));
+}
+
+function openPhraseEditor() {
+  fillPhraseEditor(currentPhrases());
+  el.phraseDialog.showModal();
+}
+
+async function savePhrases() {
+  const phrases = [...el.phraseRows.querySelectorAll(".phrase-row")]
+    .map((row) => ({
+      label: row.querySelector('[data-field="label"]').value.trim(),
+      text: row.querySelector('[data-field="text"]').value.trim(),
+      action: row.querySelector('[data-field="action"]').value,
+    }))
+    .filter((p) => p.text);
+  el.phraseSave.disabled = true;
+  try {
+    const data = await api.savePhrases(phrases);
+    state.phrases = data.phrases;
+    renderQuickPhrases();
+    renderControls();
+    el.phraseDialog.close();
+    toast("Quick phrases saved.", "ok", 2500);
+  } catch (error) {
+    toast(`Could not save: ${error.message}`, "error", 7000);
+  } finally {
+    el.phraseSave.disabled = false;
+  }
 }
 
 init();

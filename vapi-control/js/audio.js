@@ -204,6 +204,8 @@ export class ListenPlayer {
     this.lastDetectEval = 0;
     this.remainder = null;
     this.nextTime = 0;
+    this.bytesReceived = 0;
+    this.framesPlayed = 0;
     if (this.format) this.onFormat(this.format);
   }
 
@@ -291,6 +293,7 @@ export class ListenPlayer {
 
   onBinary(bytes) {
     if (!bytes.length) return;
+    this.bytesReceived += bytes.length;
     if (!this.format) {
       const now = performance.now();
       if (!this.detectFirstAt) {
@@ -358,6 +361,17 @@ export class ListenPlayer {
     if (this.nextTime < now + 0.02 || this.nextTime > now + MAX_BACKLOG_S) this.nextTime = now + TARGET_LATENCY_S;
     source.start(this.nextTime);
     this.nextTime += buffer.duration;
+    this.framesPlayed++;
+  }
+
+  // For the audio panel: is anything arriving, and is it being played?
+  stats() {
+    return {
+      bytesReceived: this.bytesReceived,
+      framesPlayed: this.framesPlayed,
+      contextState: this.ctx ? this.ctx.state : "closed",
+      format: this.format,
+    };
   }
 
   setVolume(volume) {
