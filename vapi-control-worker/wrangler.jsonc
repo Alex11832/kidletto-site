@@ -38,13 +38,11 @@
     // list only names that actually serve /cdn-cgi/access/certs, since every
     // entry is a trusted source of signing keys.
     "TEAM_DOMAIN": "https://kidletto.cloudflareaccess.com",
-    // AUD tag of the Access application. Deliberately empty: the AUD changes
-    // every time the application is recreated, and an empty value lets any
-    // application of the team above through, so the panel keeps working while
-    // Access is being set up. ALLOWED_EMAILS below is what actually restricts
-    // who gets in. Pin the AUD here once the application is final — the value
-    // is the `kid` parameter of the login redirect.
-    "POLICY_AUD": "",
+    // AUD tag of the Access application "kidletto-vapi-control - Cloudflare
+    // Workers". Recreating that application issues a NEW tag and logins then
+    // fail with "wrong audience" — read the fresh value from the `kid`
+    // parameter of the login redirect and update it here.
+    "POLICY_AUD": "9cf2a994daa261f6f0f33ae08823393a5691fb9a6030d21e38b8414d796ce66f",
     // Independent allowlist, enforced by the Worker on top of the Access policy.
     "ALLOWED_EMAILS": "geofakt@gmail.com"
   },
