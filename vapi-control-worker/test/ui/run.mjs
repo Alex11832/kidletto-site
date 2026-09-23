@@ -289,29 +289,58 @@ await check("quick phrases: say immediately; hang-up phrase needs a confirming s
   assert.equal(await js(`document.querySelector('#quickPhrases button.hangup').textContent`), "Goodbye + Hang Up", "disarms after 3 s");
 });
 
-await check("operator mode: TAKE OVER sends a silent instruction; translate routes EXACT SAY through the model", async () => {
+await check("operator mode mutes the assistant and unmutes it only for the operator's own line", async () => {
+  const types = () => mock.state.controls.map((c) => (c.payload.type === "control" ? c.payload.control : c.payload.type + (c.payload.triggerResponseEnabled === false ? ":silent" : "")));
   mock.state.controls.length = 0;
+  assert.equal(await js("document.getElementById('translateSay').checked"), true, "translate is on by default");
   await until(`!document.getElementById('modeBtn').disabled`);
   await click("modeBtn");
-  const enter = await waitControl(1);
-  assert.equal(enter.payload.type, "add-message");
-  assert.equal(enter.payload.triggerResponseEnabled, false);
-  assert.match(enter.payload.message.content, /Operator control ON/);
-  await until(`document.body.classList.contains('manual-mode') && document.getElementById('modeBtn').textContent.includes('HAND BACK')`);
-  await js(`document.getElementById('translateSay').checked = true`);
+  await until(`document.body.classList.contains('manual-mode')`);
+  assert.deepEqual(types(), ["add-message:silent", "mute-assistant"]);
+  assert.match(mock.state.controls[0].payload.message.content, /Operator control ON/);
+
+  // Russian line: unmute, the model translates and speaks it, then re-mute.
+  mock.state.controls.length = 0;
   await typeInto("sayText", "Скажи, что я подумаю");
   await until(`!document.getElementById('sayBtn').disabled`);
   await click("sayBtn");
-  const tr = await waitControl(2);
-  assert.equal(tr.payload.type, "add-message");
-  assert.equal(tr.payload.triggerResponseEnabled, true);
-  assert.ok(tr.payload.message.content.includes("Скажи, что я подумаю") && tr.payload.message.content.includes("English"));
-  await js(`document.getElementById('translateSay').checked = false`);
+  await waitControl(2);
+  assert.deepEqual(types(), ["unmute-assistant", "add-message"]);
+  const tr = mock.state.controls[1].payload.message.content;
+  assert.ok(tr.includes("Скажи, что я подумаю") && tr.includes("English"));
+  // The assistant's speech-update "stopped" re-mutes straight away.
+  await webhook({ type: "speech-update", role: "assistant", status: "stopped", call: { id: C1 }, timestamp: Date.now() });
+  await waitControl(3);
+  assert.equal(types()[2], "mute-assistant");
+
+  // English line: spoken verbatim with say (no translation), replacing queued speech.
+  mock.state.controls.length = 0;
+  await typeInto("sayText", "I'll think about it.");
+  await until(`!document.getElementById('sayBtn').disabled`);
+  await click("sayBtn");
+  await waitControl(2);
+  assert.deepEqual(types(), ["unmute-assistant", "say"]);
+  assert.deepEqual(mock.state.controls[1].payload, { type: "say", content: "I'll think about it.", endCallAfterSpoken: false, interruptAssistantEnabled: true });
+  // Without a speech event, the fallback estimate re-mutes (2.5 s minimum).
+  await waitControl(3, 6000);
+  assert.equal(types()[2], "mute-assistant");
+
+  // Hand back: silent instruction + unmute.
+  mock.state.controls.length = 0;
   await click("modeBtn");
-  const leave = await waitControl(3);
-  assert.match(leave.payload.message.content, /Operator control OFF/);
-  assert.equal(leave.payload.triggerResponseEnabled, false);
   await until(`!document.body.classList.contains('manual-mode')`);
+  assert.deepEqual(types(), ["add-message:silent", "unmute-assistant"]);
+  assert.match(mock.state.controls[0].payload.message.content, /Operator control OFF/);
+});
+
+await check("SAY & HANG UP refuses a Russian line (it speaks verbatim) and sends nothing", async () => {
+  mock.state.controls.length = 0;
+  await typeInto("sayText", "Пока, я подумаю");
+  await until(`!document.getElementById('sayHangupBtn').disabled`);
+  await click("sayHangupBtn");
+  await sleep(500);
+  assert.equal(mock.state.controls.length, 0);
+  await typeInto("sayText", "");
 });
 
 await check("DTMF keypad is disabled and labelled NOT SUPPORTED when the assistant has no dtmf tool", async () => {
@@ -414,8 +443,11 @@ await check("SAY & HANG UP: speaks, then the call ends by itself -> NO ACTIVE CA
 await check("Vapi errors are shown without crashing, and the page recovers", async () => {
   // Polling is only a safety net while events are live (15 s), so allow for it.
   mock.state.failList = 500;
+  // No periodic polling while events are live: returning to the tab re-checks.
+  await js(`document.dispatchEvent(new Event('visibilitychange'))`);
   await until(`!document.getElementById('banner').hidden && document.getElementById('banner').textContent.includes('Vapi is unavailable')`, { timeout: 25000 });
   mock.state.failList = null;
+  await js(`document.dispatchEvent(new Event('visibilitychange'))`);
   await until(`document.getElementById('banner').hidden`, { timeout: 25000 });
   assert.equal(await text("callStateText"), "NO ACTIVE CALL");
 });

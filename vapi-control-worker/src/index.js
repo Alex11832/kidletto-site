@@ -158,7 +158,7 @@ async function handleApi(request, env, identity, subpath) {
     return json({ ok: true, now: Date.now(), calls: active });
   }
 
-  const match = /^\/calls\/([^/]+)(?:\/(say|instruction|dtmf|end|listen))?$/.exec(subpath);
+  const match = /^\/calls\/([^/]+)(?:\/(say|instruction|control|dtmf|end|listen))?$/.exec(subpath);
   if (!match) throw new HttpError(404, "not_found", "Unknown API endpoint.");
   const callId = assertCallId(match[1]);
   const action = match[2] || null;
@@ -244,6 +244,15 @@ async function handleApi(request, env, identity, subpath) {
       trigger: triggerResponseEnabled,
       by: identity.email,
     });
+  }
+
+  if (action === "control") {
+    // Documented Live Call Control actions used by operator mode.
+    const allowed = new Set(["mute-assistant", "unmute-assistant"]);
+    const control = String(body.action || "");
+    if (!allowed.has(control)) throw new HttpError(400, "invalid_control", "Unknown control action.");
+    const call = await loadCall(client, env, callId, { require: "controllable" });
+    return sendControl(client, env, call, { type: "control", control }, "assistant_control_requested", { control, by: identity.email });
   }
 
   if (action === "dtmf") {

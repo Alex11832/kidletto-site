@@ -40,10 +40,24 @@ export async function secretsMatch(provided, expected) {
 
 // Vapi "Bearer Token" custom credential: Authorization: Bearer <secret>.
 // (A custom header would risk being stored by platform request logging.)
+// Accepts "Bearer <secret>" and, for a Vapi credential saved with "Include
+// Bearer Prefix" switched off, the bare secret. Either way the whole value
+// must equal the secret exactly.
 function providedSecret(request) {
-  const auth = request.headers.get("Authorization") || "";
+  const auth = (request.headers.get("Authorization") || "").trim();
   const match = /^Bearer\s+(.+)$/i.exec(auth);
-  return match ? match[1].trim() : "";
+  return match ? match[1].trim() : auth;
+}
+
+// Why a request was refused, without revealing anything about the secret
+// beyond whether a value arrived at all and its length (for spotting a
+// truncated or mistyped paste).
+function rejectionDetail(request) {
+  const auth = (request.headers.get("Authorization") || "").trim();
+  if (!auth) return { reason: "no_authorization_header" };
+  const bearer = /^Bearer\s+/i.test(auth);
+  const value = providedSecret(request);
+  return { reason: "secret_mismatch", bearerPrefix: bearer, providedLength: value.length };
 }
 
 function plain(status, text) {
@@ -109,7 +123,7 @@ export default {
     if (!env.VAPI_WEBHOOK_SECRET) return plain(503, "Webhook secret not configured");
 
     if (!(await secretsMatch(providedSecret(request), env.VAPI_WEBHOOK_SECRET))) {
-      log("webhook_rejected", { reason: "bad_secret" });
+      log("webhook_rejected", { ...rejectionDetail(request), expectedLength: String(env.VAPI_WEBHOOK_SECRET).length });
       return plain(401, "Unauthorized");
     }
 

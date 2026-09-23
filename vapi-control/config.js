@@ -13,14 +13,16 @@ window.VAPI_CONTROL_CONFIG = {
   // Access session cookie is what authenticates the operator.
   apiBase: "api/",
 
-  // How often the active-call list is refreshed.
-  //
-  // New calls normally arrive instantly over the event stream (Vapi webhook →
-  // Worker → this page), so polling is only a safety net and stays slow while
-  // "Events: live" is shown. It speeds up when that stream is down.
+  // Call detection. New calls arrive instantly over the event stream (Vapi
+  // webhook → Worker → this page); the list is fetched once on page load, on
+  // reconnect, when an event mentions an unknown call and after commands.
+  // Periodic polling is off to save Cloudflare requests.
   poll: {
-    liveMs: 15000, // event stream connected
-    fallbackMs: 3000, // event stream down: polling is the only detection left
+    // 0 = no periodic polling while "Events: live": calls are detected only
+    // from Vapi's webhook events (plus one check on page load / reconnect).
+    liveMs: 0,
+    // Used only while the event stream is disconnected. 0 = never poll.
+    fallbackMs: 30000,
     hiddenMultiplier: 4, // background tab
   },
 
@@ -54,7 +56,9 @@ window.VAPI_CONTROL_CONFIG = {
     // which speaks it in targetLanguage. Wording may therefore differ slightly
     // from a literal translation. {text} and {language} are substituted.
     translate: {
-      enabledByDefault: false,
+      // On by default. Only lines containing non-Latin script (e.g. Russian)
+      // go through the model; English text is still spoken verbatim.
+      enabledByDefault: true,
       targetLanguage: "English",
       template:
         "[Operator dictation] Say this to the caller right now, in {language}: «{text}»\n" +
@@ -68,6 +72,15 @@ window.VAPI_CONTROL_CONFIG = {
   // only voices what you send with EXACT SAY. Nothing about the saved assistant
   // changes — the instruction lives in this call and dies with it.
   operatorMode: {
+    // Also send Vapi's documented mute-assistant control while you drive, and
+    // unmute only for the moment your own line is spoken. The instruction
+    // alone is advisory — the model may still answer if you pause.
+    useMute: true,
+    // Re-mute after an operator line: when the assistant's speech-update
+    // "stopped" event arrives, or after this estimate, whichever is first.
+    charsPerSecond: 14,
+    extraMs: 1500,
+    translatedExtraMs: 2500,
     enterText:
       "[Operator control ON] A human operator is now conducting this call personally. " +
       "From this moment: do not speak on your own initiative, do not answer the other party, " +

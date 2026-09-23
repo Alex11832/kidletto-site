@@ -342,6 +342,14 @@ await check("19. AI INSTRUCTION is an add-message for this call only (assistant 
   const silent = await api(`calls/${CALL_1}/instruction`, { method: "POST", body: { text: "stay silent", triggerResponse: false } });
   assert.equal(silent.status, 200);
   assert.equal(mock.state.controls.at(-1).payload.triggerResponseEnabled, false);
+  // mute / unmute go through the documented control message; nothing else is allowed.
+  for (const action of ["mute-assistant", "unmute-assistant"]) {
+    const r = await api(`calls/${CALL_1}/control`, { method: "POST", body: { action } });
+    assert.equal(r.status, 200);
+    assert.deepEqual(mock.state.controls.at(-1).payload, { type: "control", control: action });
+  }
+  const bad = await api(`calls/${CALL_1}/control`, { method: "POST", body: { action: "say-first-message" } });
+  assert.equal(bad.status, 400);
 });
 
 await check("20. DTMF is refused (409) when the assistant has no dtmf tool; nothing is sent", async () => {
@@ -472,6 +480,16 @@ await check("webhook forwards the untouched event to the previous Server URL (wi
   // A secret in a custom header is not accepted (only the Bearer credential)
   const custom = await webhook({ type: "speech-update", role: "user", status: "started", call: { id: CALL_1 } }, { headerName: "X-Vapi-Secret" });
   assert.equal(custom.status, 401);
+  // A Vapi credential saved without the "Bearer " prefix is accepted too.
+  const bare = await fetch(`${HOOK}/vapi/events`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: FAKE_WEBHOOK_SECRET },
+    body: JSON.stringify({ message: { type: "speech-update", role: "user", status: "stopped", call: { id: CALL_1 } } }),
+  });
+  assert.equal(bare.status, 200);
+  const wrong = await fetch(`${HOOK}/vapi/events`, { method: "POST", headers: { Authorization: "Bearer nope" }, body: "{}" });
+  assert.equal(wrong.status, 401);
+  assert.ok(hook.logs.some((l) => l.includes('"reason":"secret_mismatch"') && l.includes('"providedLength":4')), "rejection is diagnosable");
   assert.equal(mock.state.forwarded[0].headers.authorization, undefined, "our credential is not forwarded");
 });
 

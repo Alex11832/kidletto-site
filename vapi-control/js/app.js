@@ -20,16 +20,16 @@ import { callElapsedMs, clockTime, directionLabel, formatDuration, shortId, stat
 
 const DEFAULTS = {
   apiBase: "api/",
-  poll: { liveMs: 15000, fallbackMs: 3000, hiddenMultiplier: 4 },
+  poll: { liveMs: 0, fallbackMs: 30000, hiddenMultiplier: 4 },
   notify: { sound: true, desktop: true, titleBadge: true },
   endedBannerMs: 5000,
   labels: { user: "PROVIDER", assistant: "ASSISTANT", system: "INSTRUCTION", tool: "TOOL" },
   say: {
     interruptAssistantByDefault: false,
     clearAfterSend: true,
-    translate: { enabledByDefault: false, targetLanguage: "English", template: "{text}" },
+    translate: { enabledByDefault: true, targetLanguage: "English", template: "{text}" },
   },
-  operatorMode: { enterText: "", leaveText: "" },
+  operatorMode: { useMute: true, charsPerSecond: 14, extraMs: 1500, translatedExtraMs: 2500, enterText: "", leaveText: "" },
   aiInstruction: { template: "{instruction}", clearAfterSend: true },
   quickPhrases: [],
   dtmf: { pauseBetweenDigits: "w", sendOnPress: false, maxLength: 32 },
@@ -102,6 +102,7 @@ const state = {
   // never silently carries the mode across.
   manualCalls: new Set(),
   notifiedCalls: new Set(),
+  remute: null, // { callId, timer } while an operator line is being spoken
 };
 if (!(state.audioFormatKey in FORMAT_PRESETS)) state.audioFormatKey = "auto";
 
@@ -212,8 +213,11 @@ async function poll() {
 // New calls arrive over the event stream, so polling is only a safety net and
 // stays slow while that stream is connected. It speeds up when the stream is
 // down, because then it is the only way to notice a call at all.
+// 0 disables periodic polling for that state. An explicit delay (page load,
+// reconnect, an event about an unknown call, after a command) always polls.
 function pollInterval() {
   let ms = state.eventsState === "connected" ? cfg.poll.liveMs : cfg.poll.fallbackMs;
+  if (!(ms > 0)) return 0;
   if (document.hidden) ms *= cfg.poll.hiddenMultiplier;
   if (state.fatal) ms *= 4;
   return ms;
@@ -221,7 +225,9 @@ function pollInterval() {
 
 function schedulePoll(delay) {
   clearTimeout(state.pollTimer);
-  state.pollTimer = setTimeout(poll, delay ?? pollInterval());
+  const ms = delay ?? pollInterval();
+  if (delay === undefined && !(ms > 0)) return;
+  state.pollTimer = setTimeout(poll, ms);
 }
 
 function updateCalls(calls) {
@@ -302,6 +308,10 @@ function callEnded(id, reason) {
   state.hangingUp = null;
   state.calls = state.calls.filter((c) => c.id !== id);
   state.manualCalls.delete(id);
+  if (state.remute?.callId === id) {
+    clearTimeout(state.remute.timer);
+    state.remute = null;
+  }
   state.ended = { callId: id, reason: reason || null };
   render();
   setTimeout(() => {
@@ -402,7 +412,9 @@ const events = new EventsClient({
   onState: (s) => {
     const was = state.eventsState;
     state.eventsState = s;
-    if ((was === "connected") !== (s === "connected")) schedulePoll();
+    // Catch up once whenever the stream (re)connects, then rely on events.
+    if (s === "connected" && was !== "connected") schedulePoll(0);
+    else if (was === "connected" && s !== "connected") schedulePoll();
     renderEventsPill();
     renderTranscript();
   },
@@ -412,6 +424,10 @@ const events = new EventsClient({
     if (affected === "*") for (const id of store.calls.keys()) state.hubSeen.add(id);
     else state.hubSeen.add(affected);
 
+    // The assistant finished speaking an operator line: mute it again at once.
+    if (msg.type === "speech" && msg.role === "assistant" && msg.status === "stopped" && state.remute?.callId === msg.callId) {
+      setTimeout(() => remuteNow(msg.callId), 300);
+    }
     const id = state.selectedId;
     if (id && (affected === "*" || affected === id)) {
       const st = store.calls.get(id);
@@ -509,26 +525,77 @@ function fill(template, values) {
   return out;
 }
 
+// Only text in another script needs the model to translate; Latin-script
+// text (already English) keeps going through verbatim say.
+function needsTranslation(text) {
+  return /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(text);
+}
+
+function speechEstimateMs(text, translated) {
+  const om = cfg.operatorMode;
+  const ms = (text.length / (om.charsPerSecond || 14)) * 1000 + (om.extraMs || 0) + (translated ? om.translatedExtraMs || 0 : 0);
+  return Math.min(30000, Math.max(2500, ms));
+}
+
+// In operator mode the assistant is muted; it is unmuted just for the
+// operator's own line and muted again once that line has been spoken.
+async function unmuteForLine(callId) {
+  if (!cfg.operatorMode.useMute || !state.manualCalls.has(callId)) return;
+  clearTimeout(state.remute?.timer);
+  state.remute = null;
+  await api.control(callId, "unmute-assistant");
+}
+
+function remuteAfterLine(callId, estimateMs) {
+  if (!cfg.operatorMode.useMute || !state.manualCalls.has(callId)) return;
+  clearTimeout(state.remute?.timer);
+  const timer = setTimeout(() => remuteNow(callId), estimateMs);
+  state.remute = { callId, timer };
+}
+
+function remuteNow(callId) {
+  if (state.remute?.callId !== callId) return;
+  clearTimeout(state.remute.timer);
+  state.remute = null;
+  if (!state.manualCalls.has(callId)) return;
+  api.control(callId, "mute-assistant").catch((error) => toast(`Could not mute the assistant again: ${error.message}`, "error", 7000));
+}
+
 async function say(text, { hangUp, translate = el.translateSay.checked } = {}) {
   const content = String(text || "").trim();
   if (!content) return false;
-  const interruptAssistant = el.interruptBot.checked;
+  const manual = state.manualCalls.has(state.selectedId);
+  // While you drive, your line replaces anything the assistant had queued.
+  const interruptAssistant = manual || el.interruptBot.checked;
+  const translateNow = translate && needsTranslation(content);
 
   // Vapi's say command is verbatim and cannot translate, so a translated line
   // goes to the model instead. That rules out endCallAfterSpoken, whose timing
-  // only exists for say — the call is ended separately once the line is out.
-  if (translate && !hangUp) {
-    const prompt = fill(cfg.say.translate.template, { text: content, language: cfg.say.translate.targetLanguage });
-    return command("say", (id) => api.instruction(id, prompt), `Sent for the assistant to say in ${cfg.say.translate.targetLanguage}.`);
-  }
-  if (translate && hangUp) {
-    toast("Translate and SAY & HANG UP cannot be combined — the exact end of a translated line is not knowable. Say it first, then END CALL.", "error", 8000);
+  // only exists for say.
+  if (translateNow && hangUp) {
+    toast("SAY & HANG UP speaks verbatim, so write that line in English — or SAY it translated and then press END CALL.", "error", 9000);
     return false;
+  }
+  if (translateNow) {
+    const prompt = fill(cfg.say.translate.template, { text: content, language: cfg.say.translate.targetLanguage });
+    return command(
+      "say",
+      async (id) => {
+        await unmuteForLine(id);
+        await api.instruction(id, prompt);
+        remuteAfterLine(id, speechEstimateMs(content, true));
+      },
+      `Sent for the assistant to say in ${cfg.say.translate.targetLanguage}.`,
+    );
   }
 
   const ok = await command(
     hangUp ? "sayHangup" : "say",
-    (id) => api.say(id, content, { endCallAfterSpoken: hangUp, interruptAssistant }),
+    async (id) => {
+      await unmuteForLine(id);
+      await api.say(id, content, { endCallAfterSpoken: hangUp, interruptAssistant });
+      if (!hangUp) remuteAfterLine(id, speechEstimateMs(content, false));
+    },
     hangUp ? "Speaking, then hanging up…" : "Sent to the call.",
   );
   if (ok && hangUp) {
@@ -568,8 +635,17 @@ async function toggleOperatorMode() {
   }
   const ok = await command(
     "mode",
-    (callId) => api.instruction(callId, text, { triggerResponse: false }),
-    goingManual ? "You are driving the call — the assistant stays silent." : "Handed back to the assistant.",
+    async (callId) => {
+      await api.instruction(callId, text, { triggerResponse: false });
+      if (cfg.operatorMode.useMute) {
+        if (state.remute?.callId === callId) {
+          clearTimeout(state.remute.timer);
+          state.remute = null;
+        }
+        await api.control(callId, goingManual ? "mute-assistant" : "unmute-assistant");
+      }
+    },
+    goingManual ? "You are driving the call — the assistant is muted." : "Handed back to the assistant.",
   );
   if (!ok) return;
   if (goingManual) state.manualCalls.add(id);
@@ -788,7 +864,7 @@ function renderMode() {
   el.modeState.dataset.state = manual ? "reconnecting" : "auto";
   el.modeState.textContent = manual ? "You (operator)" : "Assistant (auto)";
   el.modeNote.textContent = manual
-    ? "The assistant is told to stay silent. Type each line in EXACT SAY; tick Translate to write in Russian."
+    ? "The assistant is muted and told to stay silent. Each EXACT SAY line unmutes it just long enough to speak, then mutes it again."
     : "The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from EXACT SAY.";
 }
 
