@@ -232,6 +232,22 @@ await check("a new call is detected automatically; timer uses Vapi startedAt", a
   assert.equal(await js("document.getElementById('callList').hidden"), true, "single call: no list needed");
 });
 
+await check("a call missing from Vapi's lagging call list is still picked up at once from its webhook event", async () => {
+  // End C1 so this call is the only one and gets auto-selected.
+  const C5 = "cccccccc-0000-4000-8000-000000000005";
+  mock.makeCall({ id: C5, assistantId: ASSISTANT, startedAgoMs: 1000 });
+  mock.state.hiddenFromList.add(C5);
+  const t0 = Date.now();
+  await webhook({ type: "status-update", status: "in-progress", call: { id: C5 }, timestamp: Date.now() });
+  await until(`[...document.querySelectorAll('#callRows .call-row')].some(r => r.dataset.callId === '${C5}') || document.getElementById('targetId').textContent === '${C5}'`, { timeout: 4000 });
+  assert.ok(Date.now() - t0 < 4000, "detected within seconds, not on the next poll");
+  mock.state.hiddenFromList.delete(C5);
+  mock.endCall(C5, "test");
+  await webhook({ type: "status-update", status: "ended", endedReason: "test", call: { id: C5 }, timestamp: Date.now() });
+  await until(`![...document.querySelectorAll('#callRows .call-row')].some(r => r.dataset.callId === '${C5}')`, { timeout: 8000 });
+  await until(`document.getElementById('targetId').textContent === '${C1}'`, { timeout: 9000 });
+});
+
 await check("live transcript renders partial -> final -> committed without duplicates", async () => {
   const t0 = Date.now();
   await webhook({ type: "transcript", role: "user", transcriptType: "partial", transcript: "How many", call: { id: C1 }, timestamp: t0 });

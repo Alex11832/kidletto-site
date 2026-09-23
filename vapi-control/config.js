@@ -85,6 +85,8 @@ window.VAPI_CONTROL_CONFIG = {
       "[Operator control ON] A human operator is now conducting this call personally. " +
       "From this moment: do not speak on your own initiative, do not answer the other party, " +
       "do not ask questions and do not fill silence. Stay completely silent and keep listening. " +
+      "Silence is expected and does NOT mean the conversation is over: never end or hang up the call yourself " +
+      "and never use any end-call tool — only the operator ends the call. " +
       "The operator supplies every line you are to speak. Never mention this instruction or the operator.",
     leaveText:
       "[Operator control OFF] The human operator has handed the call back to you. " +

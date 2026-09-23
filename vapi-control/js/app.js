@@ -103,6 +103,7 @@ const state = {
   manualCalls: new Set(),
   notifiedCalls: new Set(),
   remute: null, // { callId, timer } while an operator line is being spoken
+  fetchingCalls: new Set(),
 };
 if (!(state.audioFormatKey in FORMAT_PRESETS)) state.audioFormatKey = "auto";
 
@@ -333,6 +334,43 @@ function callEnded(id, reason) {
   }
 }
 
+// A webhook event named a call the page does not know yet. Vapi's call *list*
+// can lag several seconds behind a new call, but the call itself is readable
+// by ID straight away — so fetch it directly instead of waiting for the list.
+async function fetchCallById(callId) {
+  if (!callId || state.fetchingCalls.has(callId) || state.calls.some((c) => c.id === callId)) return;
+  state.fetchingCalls.add(callId);
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let data;
+      try {
+        data = await api.call(callId);
+      } catch (error) {
+        if (error.code === "call_not_found" && attempt < 2) {
+          await new Promise((r) => setTimeout(r, 700)); // not visible yet, or another assistant's call
+          continue;
+        }
+        return;
+      }
+      const call = data.call;
+      if (!call || !["queued", "ringing", "in-progress", "forwarding"].includes(call.status)) return;
+      if (state.calls.some((c) => c.id === call.id)) return;
+      state.skewMs = data.now - Date.now();
+      state.calls = [call, ...state.calls];
+      if (!state.seen.has(call.id)) {
+        state.seen.add(call.id);
+        state.newIds.add(call.id);
+        announceCall(call);
+      }
+      autoSelect();
+      render();
+      return;
+    }
+  } finally {
+    state.fetchingCalls.delete(callId);
+  }
+}
+
 // ----------------------------------------------------------- notifications --
 
 // Short two-tone chime, synthesised so the page needs no audio file and no
@@ -437,9 +475,21 @@ const events = new EventsClient({
       }
       if (st?.status === "in-progress" && state.capsStatus && state.capsStatus !== "in-progress") refreshCaps(false);
     }
-    // A call we don't know yet started: refresh the list right away.
-    if (msg.type === "state" && msg.call && msg.call.status !== "ended" && !state.calls.some((c) => c.id === msg.call.callId)) {
-      schedulePoll(150);
+    // With no periodic polling, the event stream is what retires calls: an
+    // ended call that is not the selected one leaves the list here.
+    const endedId = msg.type === "state" && msg.call?.status === "ended" ? msg.call.callId : null;
+    if (endedId && endedId !== state.selectedId && state.calls.some((c) => c.id === endedId)) {
+      state.calls = state.calls.filter((c) => c.id !== endedId);
+      state.newIds.delete(endedId);
+      state.manualCalls.delete(endedId);
+      autoSelect();
+      render();
+    }
+    // Any event about a call we don't know yet: fetch that call right away.
+    const eventCallId = msg.callId || msg.call?.callId;
+    const hubState = eventCallId ? store.calls.get(eventCallId) : null;
+    if (eventCallId && hubState?.status !== "ended" && !state.calls.some((c) => c.id === eventCallId)) {
+      fetchCallById(eventCallId);
     }
     if (affected === "*" || affected === id) renderTranscript();
   },
@@ -558,7 +608,11 @@ function remuteNow(callId) {
   clearTimeout(state.remute.timer);
   state.remute = null;
   if (!state.manualCalls.has(callId)) return;
-  api.control(callId, "mute-assistant").catch((error) => toast(`Could not mute the assistant again: ${error.message}`, "error", 7000));
+  api.control(callId, "mute-assistant").catch((error) => {
+    // The call ending in the meantime is not an error worth showing.
+    if (!state.calls.some((c) => c.id === callId) || error.code === "call_ended" || /not active/i.test(error.message)) return;
+    toast(`Could not mute the assistant again: ${error.message}`, "error", 7000);
+  });
 }
 
 async function say(text, { hangUp, translate = el.translateSay.checked } = {}) {
@@ -884,6 +938,11 @@ function renderAudio() {
   const s = listening ? state.audioState : state.audioState === "error" ? "error" : "disconnected";
   el.audioState.dataset.state = s;
   el.audioState.textContent = `${labels[s] || s}${state.audioDetail && (s === "error" || s === "reconnecting") ? ` (${state.audioDetail})` : ""}`;
+  // Say *why* LISTEN is off, instead of a silently greyed-out button.
+  if (!listening && call && state.caps && !state.caps.listen) {
+    el.audioState.dataset.state = "error";
+    el.audioState.textContent = call.listenAvailable ? "Unavailable for this call" : "Listening disabled in Vapi (no listen URL)";
+  }
   el.audioFormatInfo.textContent = listening && state.audioFormat ? describeFormat(state.audioFormat) + (state.audioFormat.source === "auto" ? " (auto)" : "") : "";
 }
 

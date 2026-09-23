@@ -17,6 +17,8 @@ export async function startMockVapi({ apiKey, jwks }) {
     listenConnections: [],
     nonGetAssistantRequests: 0,
     failList: null,
+    // Calls Vapi's list endpoint does not show yet (it lags behind new calls).
+    hiddenFromList: new Set(),
   };
   let base = "";
 
@@ -62,7 +64,7 @@ export async function startMockVapi({ apiKey, jwks }) {
       state.listRequests.push(Object.fromEntries(url.searchParams));
       if (state.failList) return send(state.failList, { message: "upstream exploded" });
       const assistantId = url.searchParams.get("assistantId");
-      const list = [...state.calls.values()].filter((c) => !assistantId || c.assistantId === assistantId);
+      const list = [...state.calls.values()].filter((c) => (!assistantId || c.assistantId === assistantId) && !state.hiddenFromList.has(c.id));
       return send(200, list);
     }
     if ((m = /^\/call\/([^/]+)$/.exec(url.pathname)) && req.method === "GET") {
