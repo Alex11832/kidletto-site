@@ -22,6 +22,7 @@
     <div class="timer" id="timer" aria-label="Call duration">--:--</div>
     <div class="meta">
       <span class="pill" id="eventsPill" data-state="offline" title="Live transcript/event stream">Events: offline</span>
+      <button type="button" class="pill bell" id="enableNotify" hidden title="Allow desktop notifications for incoming calls">🔔 Notify me</button>
       <span class="pill warn" id="configWarning" hidden></span>
       <span class="user" id="userEmail"></span>
     </div>
@@ -49,6 +50,17 @@
         <div class="target-label">CONTROLLING</div>
         <code class="target-id" id="targetId">— no call selected —</code>
         <div class="target-meta" id="targetMeta"></div>
+      </div>
+
+      <div class="group" id="modeGroup">
+        <div class="group-head">
+          <span>WHO IS TALKING</span>
+          <span class="state-chip" id="modeState" data-state="auto">Assistant (auto)</span>
+        </div>
+        <div class="row">
+          <button type="button" class="btn" id="modeBtn" disabled>TAKE OVER</button>
+        </div>
+        <p class="note" id="modeNote">The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from EXACT SAY.</p>
       </div>
 
       <div class="group">
@@ -80,6 +92,7 @@
         <div class="group-head"><span>EXACT SAY</span><span class="muted">Ctrl+Enter = SAY</span></div>
         <textarea id="sayText" rows="2" maxlength="1000" placeholder="Spoken verbatim in the assistant's voice"></textarea>
         <label class="check"><input type="checkbox" id="interruptBot"> Interrupt bot speech</label>
+        <label class="check"><input type="checkbox" id="translateSay"> Translate to <span id="translateLang">English</span> <span class="muted">(model speaks it, not verbatim)</span></label>
         <div class="row">
           <button type="button" class="btn primary" id="sayBtn" disabled>SAY</button>
           <button type="button" class="btn warn" id="sayHangupBtn" disabled>SAY &amp; HANG UP</button>

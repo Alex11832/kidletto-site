@@ -20,11 +20,16 @@ import { callElapsedMs, clockTime, directionLabel, formatDuration, shortId, stat
 
 const DEFAULTS = {
   apiBase: "api/",
-  pollIntervalMs: 2500,
-  hiddenPollIntervalMs: 10000,
+  poll: { liveMs: 15000, fallbackMs: 3000, hiddenMultiplier: 4 },
+  notify: { sound: true, desktop: true, titleBadge: true },
   endedBannerMs: 5000,
   labels: { user: "PROVIDER", assistant: "ASSISTANT", system: "INSTRUCTION", tool: "TOOL" },
-  say: { interruptAssistantByDefault: false, clearAfterSend: true },
+  say: {
+    interruptAssistantByDefault: false,
+    clearAfterSend: true,
+    translate: { enabledByDefault: false, targetLanguage: "English", template: "{text}" },
+  },
+  operatorMode: { enterText: "", leaveText: "" },
   aiInstruction: { template: "{instruction}", clearAfterSend: true },
   quickPhrases: [],
   dtmf: { pauseBetweenDigits: "w", sendOnPress: false, maxLength: 32 },
@@ -93,6 +98,10 @@ const state = {
   audioFormatKey: loadPref("audioFormat", cfg.listen.defaultFormat),
   volume: Number(loadPref("volume", cfg.listen.volume)) || 1,
   endTarget: null,
+  // Call IDs the operator has taken over. Kept per call so switching calls
+  // never silently carries the mode across.
+  manualCalls: new Set(),
+  notifiedCalls: new Set(),
 };
 if (!(state.audioFormatKey in FORMAT_PRESETS)) state.audioFormatKey = "auto";
 
@@ -101,8 +110,14 @@ const el = {
   callStateText: $("callStateText"),
   timer: $("timer"),
   eventsPill: $("eventsPill"),
+  enableNotify: $("enableNotify"),
   configWarning: $("configWarning"),
   userEmail: $("userEmail"),
+  modeState: $("modeState"),
+  modeBtn: $("modeBtn"),
+  modeNote: $("modeNote"),
+  translateSay: $("translateSay"),
+  translateLang: $("translateLang"),
   banner: $("banner"),
   callList: $("callList"),
   callRows: $("callRows"),
@@ -194,10 +209,19 @@ async function poll() {
   }
 }
 
+// New calls arrive over the event stream, so polling is only a safety net and
+// stays slow while that stream is connected. It speeds up when the stream is
+// down, because then it is the only way to notice a call at all.
+function pollInterval() {
+  let ms = state.eventsState === "connected" ? cfg.poll.liveMs : cfg.poll.fallbackMs;
+  if (document.hidden) ms *= cfg.poll.hiddenMultiplier;
+  if (state.fatal) ms *= 4;
+  return ms;
+}
+
 function schedulePoll(delay) {
   clearTimeout(state.pollTimer);
-  const ms = delay ?? (document.hidden ? cfg.hiddenPollIntervalMs : cfg.pollIntervalMs) * (state.fatal ? 4 : 1);
-  state.pollTimer = setTimeout(poll, ms);
+  state.pollTimer = setTimeout(poll, delay ?? pollInterval());
 }
 
 function updateCalls(calls) {
@@ -205,7 +229,10 @@ function updateCalls(calls) {
   for (const call of calls) {
     if (!state.seen.has(call.id)) {
       state.seen.add(call.id);
-      if (!firstLoad) state.newIds.add(call.id);
+      if (!firstLoad) {
+        state.newIds.add(call.id);
+        announceCall(call);
+      }
     }
   }
   state.calls = calls;
@@ -274,6 +301,7 @@ function callEnded(id, reason) {
   state.dtmf = "";
   state.hangingUp = null;
   state.calls = state.calls.filter((c) => c.id !== id);
+  state.manualCalls.delete(id);
   state.ended = { callId: id, reason: reason || null };
   render();
   setTimeout(() => {
@@ -295,12 +323,86 @@ function callEnded(id, reason) {
   }
 }
 
+// ----------------------------------------------------------- notifications --
+
+// Short two-tone chime, synthesised so the page needs no audio file and no
+// extra request. Browsers only allow this after the operator has interacted
+// with the page, which the notification permission button takes care of.
+function playChime() {
+  if (!cfg.notify.sound) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const now = ctx.currentTime;
+    [880, 1320].forEach((freq, index) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      const start = now + index * 0.18;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.25, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.16);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(start);
+      osc.stop(start + 0.18);
+    });
+    setTimeout(() => ctx.close().catch(() => {}), 800);
+  } catch {
+    // Audio unavailable; the visual cues still fire.
+  }
+}
+
+function announceCall(call) {
+  if (state.notifiedCalls.has(call.id)) return;
+  state.notifiedCalls.add(call.id);
+  if (state.notifiedCalls.size > 200) state.notifiedCalls.clear();
+  playChime();
+  if (cfg.notify.desktop && window.Notification?.permission === "granted") {
+    try {
+      const who = call.customerNumber || call.customerName || directionLabel(call.direction);
+      const note = new Notification("Vapi: incoming call", { body: `${who} · ${statusLabel(call.status)}`, tag: call.id, renotify: false });
+      note.onclick = () => {
+        window.focus();
+        selectCall(call.id);
+        note.close();
+      };
+    } catch {
+      // Notification constructor can throw on some platforms.
+    }
+  }
+}
+
+function updateTitle() {
+  if (!cfg.notify.titleBadge) return;
+  const active = state.calls.length;
+  document.title = active > 0 ? `(${active}) Vapi Live Control` : "Vapi Live Control";
+}
+
+async function askNotifyPermission() {
+  if (!window.Notification) return;
+  try {
+    await Notification.requestPermission();
+  } catch {
+    // Older browsers use the callback form; ignore.
+  }
+  renderNotifyButton();
+}
+
+function renderNotifyButton() {
+  const supported = Boolean(window.Notification);
+  el.enableNotify.hidden = !supported || !cfg.notify.desktop || Notification.permission !== "default";
+}
+
 // ------------------------------------------------------------ event stream --
 
 const events = new EventsClient({
   url: api.eventsUrl(),
   onState: (s) => {
+    const was = state.eventsState;
     state.eventsState = s;
+    if ((was === "connected") !== (s === "connected")) schedulePoll();
     renderEventsPill();
     renderTranscript();
   },
@@ -374,7 +476,7 @@ function stopListening(reason) {
 
 // ---------------------------------------------------------------- commands --
 
-const COMMAND_LABELS = { say: "Say", sayHangup: "Say & hang up", instruction: "AI instruction", dtmf: "DTMF", end: "End call" };
+const COMMAND_LABELS = { say: "Say", sayHangup: "Say & hang up", instruction: "AI instruction", mode: "Operator mode", dtmf: "DTMF", end: "End call" };
 
 async function command(name, fn, successMessage) {
   const callId = state.selectedId;
@@ -401,10 +503,29 @@ async function command(name, fn, successMessage) {
   }
 }
 
-async function say(text, { hangUp }) {
+function fill(template, values) {
+  let out = String(template || "");
+  for (const [key, value] of Object.entries(values)) out = out.split(`{${key}}`).join(value);
+  return out;
+}
+
+async function say(text, { hangUp, translate = el.translateSay.checked } = {}) {
   const content = String(text || "").trim();
   if (!content) return false;
   const interruptAssistant = el.interruptBot.checked;
+
+  // Vapi's say command is verbatim and cannot translate, so a translated line
+  // goes to the model instead. That rules out endCallAfterSpoken, whose timing
+  // only exists for say — the call is ended separately once the line is out.
+  if (translate && !hangUp) {
+    const prompt = fill(cfg.say.translate.template, { text: content, language: cfg.say.translate.targetLanguage });
+    return command("say", (id) => api.instruction(id, prompt), `Sent for the assistant to say in ${cfg.say.translate.targetLanguage}.`);
+  }
+  if (translate && hangUp) {
+    toast("Translate and SAY & HANG UP cannot be combined — the exact end of a translated line is not knowable. Say it first, then END CALL.", "error", 8000);
+    return false;
+  }
+
   const ok = await command(
     hangUp ? "sayHangup" : "say",
     (id) => api.say(id, content, { endCallAfterSpoken: hangUp, interruptAssistant }),
@@ -427,10 +548,33 @@ async function sayFromInput(hangUp) {
 async function sendInstruction() {
   const instruction = el.instructionText.value.trim();
   if (!instruction) return;
-  const text = String(cfg.aiInstruction.template || "{instruction}").split("{instruction}").join(instruction);
+  const text = fill(cfg.aiInstruction.template || "{instruction}", { instruction });
   const ok = await command("instruction", (id) => api.instruction(id, text), "Instruction sent to the AI.");
   if (ok && cfg.aiInstruction.clearAfterSend) el.instructionText.value = "";
   renderControls();
+}
+
+// Operator mode. Vapi has no "hand over to a human" switch, so the assistant is
+// told, for this call only, to stop improvising and wait for dictated lines.
+// The message is inserted without triggering a reply, so nothing is spoken.
+async function toggleOperatorMode() {
+  const id = state.selectedId;
+  if (!id) return;
+  const goingManual = !state.manualCalls.has(id);
+  const text = goingManual ? cfg.operatorMode.enterText : cfg.operatorMode.leaveText;
+  if (!text) {
+    toast("Operator mode text is not configured (config.js → operatorMode).", "error");
+    return;
+  }
+  const ok = await command(
+    "mode",
+    (callId) => api.instruction(callId, text, { triggerResponse: false }),
+    goingManual ? "You are driving the call — the assistant stays silent." : "Handed back to the assistant.",
+  );
+  if (!ok) return;
+  if (goingManual) state.manualCalls.add(id);
+  else state.manualCalls.delete(id);
+  render();
 }
 
 function dtmfSequence(keys) {
@@ -474,6 +618,8 @@ async function confirmEnd() {
 // --------------------------------------------------------------- rendering --
 
 function render() {
+  updateTitle();
+  renderMode();
   renderHeader();
   renderBanner();
   renderCallList();
@@ -632,6 +778,20 @@ function renderControls() {
       : "Vapi's live call control API cannot send operator DTMF. To enable this keypad, add Vapi's built-in DTMF tool to the assistant (see README).";
 }
 
+function renderMode() {
+  const id = state.selectedId;
+  const manual = Boolean(id && state.manualCalls.has(id));
+  document.body.classList.toggle("manual-mode", manual);
+  el.modeBtn.disabled = !canControl() || state.busy.has("mode");
+  el.modeBtn.classList.toggle("on", manual);
+  el.modeBtn.textContent = manual ? "HAND BACK TO ASSISTANT" : "TAKE OVER";
+  el.modeState.dataset.state = manual ? "reconnecting" : "auto";
+  el.modeState.textContent = manual ? "You (operator)" : "Assistant (auto)";
+  el.modeNote.textContent = manual
+    ? "The assistant is told to stay silent. Type each line in EXACT SAY; tick Translate to write in Russian."
+    : "The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from EXACT SAY.";
+}
+
 function renderAudio() {
   const listening = Boolean(state.listen);
   const call = selectedCall();
@@ -788,7 +948,8 @@ function renderQuickPhrases() {
         clearTimeout(disarmTimer);
         btn.classList.remove("armed");
         btn.textContent = phrase.label || phrase.text;
-        await say(phrase.text, { hangUp });
+        // Quick phrases are already written in the call's language.
+        await say(phrase.text, { hangUp, translate: false });
       });
       return btn;
     });
@@ -815,6 +976,11 @@ function bindUi() {
   });
 
   el.interruptBot.checked = Boolean(cfg.say.interruptAssistantByDefault);
+  el.translateSay.checked = Boolean(cfg.say.translate.enabledByDefault);
+  el.translateLang.textContent = cfg.say.translate.targetLanguage;
+  el.modeBtn.addEventListener("click", toggleOperatorMode);
+  el.enableNotify.addEventListener("click", askNotifyPermission);
+  renderNotifyButton();
   el.sayText.addEventListener("input", renderControls);
   el.instructionText.addEventListener("input", renderControls);
   el.sayBtn.addEventListener("click", () => sayFromInput(false));

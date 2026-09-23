@@ -233,9 +233,17 @@ async function handleApi(request, env, identity, subpath) {
 
   if (action === "instruction") {
     const text = requireText(body.text, MAX_INSTRUCTION_CHARS, "Instruction");
+    // triggerResponse false inserts the message silently: used to switch the
+    // assistant into or out of operator-controlled mode without making it
+    // speak. Anything else should make the model answer straight away.
+    const triggerResponseEnabled = body.triggerResponse !== false;
     const call = await loadCall(client, env, callId, { require: "controllable" });
-    const payload = { type: "add-message", message: { role: "system", content: text }, triggerResponseEnabled: true };
-    return sendControl(client, env, call, payload, "ai_instruction_requested", { chars: text.length, by: identity.email });
+    const payload = { type: "add-message", message: { role: "system", content: text }, triggerResponseEnabled };
+    return sendControl(client, env, call, payload, "ai_instruction_requested", {
+      chars: text.length,
+      trigger: triggerResponseEnabled,
+      by: identity.email,
+    });
   }
 
   if (action === "dtmf") {

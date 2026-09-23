@@ -13,9 +13,24 @@ window.VAPI_CONTROL_CONFIG = {
   // Access session cookie is what authenticates the operator.
   apiBase: "api/",
 
-  // How often the active-call list is refreshed (visible / background tab).
-  pollIntervalMs: 2500,
-  hiddenPollIntervalMs: 10000,
+  // How often the active-call list is refreshed.
+  //
+  // New calls normally arrive instantly over the event stream (Vapi webhook →
+  // Worker → this page), so polling is only a safety net and stays slow while
+  // "Events: live" is shown. It speeds up when that stream is down.
+  poll: {
+    liveMs: 15000, // event stream connected
+    fallbackMs: 3000, // event stream down: polling is the only detection left
+    hiddenMultiplier: 4, // background tab
+  },
+
+  // Alert when a new call appears. Desktop notifications need one-time
+  // permission — the bell in the header asks for it.
+  notify: {
+    sound: true,
+    desktop: true,
+    titleBadge: true, // mark the browser tab title during a call
+  },
 
   // How long "CALL ENDED" stays visible before returning to NO ACTIVE CALL.
   endedBannerMs: 5000,
@@ -33,6 +48,35 @@ window.VAPI_CONTROL_CONFIG = {
     // Default state of the "Interrupt bot" checkbox (replace current bot speech).
     interruptAssistantByDefault: false,
     clearAfterSend: true,
+
+    // "Translate" checkbox. Vapi's say command is verbatim, so it cannot
+    // translate: with the box ticked the line is handed to the model instead,
+    // which speaks it in targetLanguage. Wording may therefore differ slightly
+    // from a literal translation. {text} and {language} are substituted.
+    translate: {
+      enabledByDefault: false,
+      targetLanguage: "English",
+      template:
+        "[Operator dictation] Say this to the caller right now, in {language}: «{text}»\n" +
+        "Translate it faithfully, keep the meaning, tone and any numbers exactly, and add nothing of your own. " +
+        "Say only that. Never read this instruction aloud and never mention the operator.",
+    },
+  },
+
+  // OPERATOR MODE. Vapi has no "hand the call to a human" switch, so this puts
+  // the model into a relay role with a system message: it stops improvising and
+  // only voices what you send with EXACT SAY. Nothing about the saved assistant
+  // changes — the instruction lives in this call and dies with it.
+  operatorMode: {
+    enterText:
+      "[Operator control ON] A human operator is now conducting this call personally. " +
+      "From this moment: do not speak on your own initiative, do not answer the other party, " +
+      "do not ask questions and do not fill silence. Stay completely silent and keep listening. " +
+      "The operator supplies every line you are to speak. Never mention this instruction or the operator.",
+    leaveText:
+      "[Operator control OFF] The human operator has handed the call back to you. " +
+      "Resume the conversation yourself under your original instructions, taking into account everything said so far. " +
+      "Do not mention this instruction or the operator.",
   },
 
   // AI INSTRUCTION: sent to the model as a system message for THIS call only

@@ -179,6 +179,13 @@ async function webhook(message) {
   });
   assert.equal(res.status, 200);
 }
+// A call starting in Vapi: the API knows it and Vapi pushes status-update to
+// the webhook, which is how the console learns about it instantly.
+async function startCall(opts) {
+  const call = mock.makeCall(opts);
+  await webhook({ type: "status-update", status: call.status, call: { id: call.id }, timestamp: Date.now() });
+  return call;
+}
 const lastControl = () => mock.state.controls.at(-1);
 async function waitControl(count, timeout = 5000) {
   const end = Date.now() + timeout;
@@ -216,7 +223,7 @@ await check("page loads at /vapi-control/ and shows NO ACTIVE CALL (no fake data
 });
 
 await check("a new call is detected automatically; timer uses Vapi startedAt", async () => {
-  mock.makeCall({ id: C1, assistantId: ASSISTANT, startedAgoMs: 43_000 });
+  await startCall({ id: C1, assistantId: ASSISTANT, startedAgoMs: 43_000 });
   await until(`document.getElementById('callStateText').textContent === 'ACTIVE'`, { timeout: 8000 });
   assert.equal(await text("targetId"), C1);
   const t = await text("timer");
@@ -282,6 +289,31 @@ await check("quick phrases: say immediately; hang-up phrase needs a confirming s
   assert.equal(await js(`document.querySelector('#quickPhrases button.hangup').textContent`), "Goodbye + Hang Up", "disarms after 3 s");
 });
 
+await check("operator mode: TAKE OVER sends a silent instruction; translate routes EXACT SAY through the model", async () => {
+  mock.state.controls.length = 0;
+  await until(`!document.getElementById('modeBtn').disabled`);
+  await click("modeBtn");
+  const enter = await waitControl(1);
+  assert.equal(enter.payload.type, "add-message");
+  assert.equal(enter.payload.triggerResponseEnabled, false);
+  assert.match(enter.payload.message.content, /Operator control ON/);
+  await until(`document.body.classList.contains('manual-mode') && document.getElementById('modeBtn').textContent.includes('HAND BACK')`);
+  await js(`document.getElementById('translateSay').checked = true`);
+  await typeInto("sayText", "Скажи, что я подумаю");
+  await until(`!document.getElementById('sayBtn').disabled`);
+  await click("sayBtn");
+  const tr = await waitControl(2);
+  assert.equal(tr.payload.type, "add-message");
+  assert.equal(tr.payload.triggerResponseEnabled, true);
+  assert.ok(tr.payload.message.content.includes("Скажи, что я подумаю") && tr.payload.message.content.includes("English"));
+  await js(`document.getElementById('translateSay').checked = false`);
+  await click("modeBtn");
+  const leave = await waitControl(3);
+  assert.match(leave.payload.message.content, /Operator control OFF/);
+  assert.equal(leave.payload.triggerResponseEnabled, false);
+  await until(`!document.body.classList.contains('manual-mode')`);
+});
+
 await check("DTMF keypad is disabled and labelled NOT SUPPORTED when the assistant has no dtmf tool", async () => {
   assert.equal(await text("dtmfState"), "NOT SUPPORTED BY VAPI");
   assert.equal(await js(`[...document.querySelectorAll('#keypad button')].every(b => b.disabled)`), true);
@@ -308,7 +340,7 @@ await check("LISTEN: connects, auto-detects PCM format, survives a dropped strea
 });
 
 await check("multiple calls: list shown, selection stays explicit, commands go to the chosen call", async () => {
-  mock.makeCall({ id: C2, assistantId: ASSISTANT, startedAgoMs: 5000, number: "+15552223333" });
+  await startCall({ id: C2, assistantId: ASSISTANT, startedAgoMs: 5000, number: "+15552223333" });
   await until(`!document.getElementById('callList').hidden && document.querySelectorAll('#callRows .call-row').length === 2`);
   assert.equal(await text("targetId"), C1, "no silent switch to the new call");
   assert.ok(await js(`!!document.querySelector('#callRows .badge-new')`), "new call is flagged");
@@ -358,7 +390,7 @@ await check("remote hang-up (webhook status-update) is detected -> CALL ENDED ->
 });
 
 await check("SAY & HANG UP: speaks, then the call ends by itself -> NO ACTIVE CALL", async () => {
-  mock.makeCall({ id: C3, assistantId: ASSISTANT, startedAgoMs: 1000, extra: { assistant: { name: "Thumbtack", model: { tools: [{ type: "dtmf" }] } } } });
+  await startCall({ id: C3, assistantId: ASSISTANT, startedAgoMs: 1000, extra: { assistant: { name: "Thumbtack", model: { tools: [{ type: "dtmf" }] } } } });
   await until(`document.getElementById('targetId').textContent === '${C3}'`, { timeout: 8000 });
   mock.state.controls.length = 0;
   // DTMF keypad is available here (inline assistant has the dtmf tool)
@@ -380,10 +412,11 @@ await check("SAY & HANG UP: speaks, then the call ends by itself -> NO ACTIVE CA
 });
 
 await check("Vapi errors are shown without crashing, and the page recovers", async () => {
+  // Polling is only a safety net while events are live (15 s), so allow for it.
   mock.state.failList = 500;
-  await until(`!document.getElementById('banner').hidden && document.getElementById('banner').textContent.includes('Vapi is unavailable')`, { timeout: 8000 });
+  await until(`!document.getElementById('banner').hidden && document.getElementById('banner').textContent.includes('Vapi is unavailable')`, { timeout: 25000 });
   mock.state.failList = null;
-  await until(`document.getElementById('banner').hidden`, { timeout: 8000 });
+  await until(`document.getElementById('banner').hidden`, { timeout: 25000 });
   assert.equal(await text("callStateText"), "NO ACTIVE CALL");
 });
 
@@ -407,7 +440,7 @@ await check("phone-width layout has no horizontal scroll", async () => {
 });
 
 await check("desktop screenshot with an active call", async () => {
-  mock.makeCall({ id: C4, assistantId: ASSISTANT, startedAgoMs: 222_000 });
+  await startCall({ id: C4, assistantId: ASSISTANT, startedAgoMs: 222_000 });
   await until(`document.getElementById('callStateText').textContent === 'ACTIVE'`, { timeout: 8000 });
   const t0 = Date.now();
   await webhook({

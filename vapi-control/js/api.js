@@ -64,7 +64,8 @@ export function createApi(baseUrl) {
     call: (id, { select = false } = {}) => request(`${callPath(id)}${select ? "?select=1" : ""}`),
     say: (id, text, { endCallAfterSpoken = false, interruptAssistant = false } = {}) =>
       request(callPath(id, "say"), { method: "POST", body: { text, endCallAfterSpoken, interruptAssistant } }),
-    instruction: (id, text) => request(callPath(id, "instruction"), { method: "POST", body: { text } }),
+    instruction: (id, text, { triggerResponse = true } = {}) =>
+      request(callPath(id, "instruction"), { method: "POST", body: { text, triggerResponse } }),
     dtmf: (id, keys) => request(callPath(id, "dtmf"), { method: "POST", body: { keys } }),
     end: (id) => request(callPath(id, "end"), { method: "POST", body: {} }),
     listenUrl: (id) => wsUrl(callPath(id, "listen")),

@@ -69,6 +69,13 @@ code { font-family: var(--mono); }
 .pill[data-state="connected"] { color: var(--green); border-color: rgba(47, 208, 122, 0.4); }
 .pill[data-state="reconnecting"], .pill[data-state="connecting"] { color: var(--amber); border-color: rgba(243, 178, 60, 0.4); }
 .pill.warn { color: var(--amber); border-color: rgba(243, 178, 60, 0.5); cursor: help; }
+.pill.bell { background: none; cursor: pointer; font: inherit; font-size: 11px; }
+.pill.bell:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Operator mode: the whole console turns amber while the human is driving. */
+body.manual-mode .controls-panel { box-shadow: inset 0 0 0 1px rgba(243, 178, 60, 0.45); }
+body.manual-mode #modeGroup { border-top-color: rgba(243, 178, 60, 0.45); }
+#modeBtn.on { background: #4a3710; border-color: var(--amber); color: #ffe6b8; }
 
 /* ---------- banner ---------- */
 .banner { margin: 10px 16px 0; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); }

@@ -338,6 +338,10 @@ await check("19. AI INSTRUCTION is an add-message for this call only (assistant 
     authorization: null,
   });
   assert.equal(mock.state.nonGetAssistantRequests, 0, "the assistant configuration must never be modified");
+  // Operator mode inserts the instruction silently (no reply triggered).
+  const silent = await api(`calls/${CALL_1}/instruction`, { method: "POST", body: { text: "stay silent", triggerResponse: false } });
+  assert.equal(silent.status, 200);
+  assert.equal(mock.state.controls.at(-1).payload.triggerResponseEnabled, false);
 });
 
 await check("20. DTMF is refused (409) when the assistant has no dtmf tool; nothing is sent", async () => {
