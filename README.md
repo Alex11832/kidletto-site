@@ -80,6 +80,12 @@ Kidletto is a web platform that enables parents to create personalized children'
 5. **View the site**:
    Open `http://localhost:4000` in your browser
 
+### Local Style Checklist
+
+1. Run `bundle install` and `bundle exec jekyll serve --livereload` to start the development server with the latest styles (this enables auto rebuilds after edits).
+2. Visit `http://localhost:4000` (or `http://127.0.0.1:4000`) and confirm the homepage matches the provided hero/feature/testimonial layout.
+3. In your browser DevTools' Network tab, filter for `main.css` and ensure the `GET /assets/main.css` request returns `200 OK`, proving the compiled stylesheet is applied.
+
 ## 📁 Project Structure
 
 ```
@@ -87,8 +93,7 @@ kidletto-site/
 ├── _config.yml              # Jekyll configuration
 ├── _layouts/                # Layout templates (inherited from Minima)
 ├── assets/
-│   └── css/
-│       └── style.scss       # Custom styles and SCSS
+│   └── main.scss        # Custom SCSS entry point (compiled to /assets/main.css)
 ├── index.md                 # Homepage
 ├── form.md                  # Story creation form
 ├── about.md                 # About page
