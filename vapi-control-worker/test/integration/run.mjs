@@ -11,6 +11,7 @@ import WebSocket from "ws";
 import { createTestIdp } from "../helpers/jwt.mjs";
 import { startWorkers, stopWorker, WORKER_DIR } from "../helpers/devserver.mjs";
 import { startMockVapi } from "./mock-vapi.mjs";
+import { fakeSubscription, verifyVapid, vapidKeys } from "../helpers/webpush.mjs";
 
 const FAKE_VAPI_KEY = "test-vapi-private-key-0d3f9c1e-NEVER-LEAK";
 const FAKE_WEBHOOK_SECRET = "test-webhook-secret-7b2a41-NEVER-LEAK";
@@ -23,6 +24,7 @@ const CALL_2 = "aaaaaaaa-0000-4000-8000-000000000002";
 const CALL_OTHER = "bbbbbbbb-0000-4000-8000-000000000003";
 const CALL_DTMF = "aaaaaaaa-0000-4000-8000-000000000004";
 const PORT = 8797;
+const VAPID = vapidKeys();
 
 const results = [];
 const bodies = [];
@@ -126,9 +128,11 @@ try {
     port: PORT,
     inspectorPort: 9341,
     stateDir: path.join(WORKER_DIR, ".wrangler", "test-integration"),
-    secrets: { VAPI_API_KEY: FAKE_VAPI_KEY, VAPI_WEBHOOK_SECRET: FAKE_WEBHOOK_SECRET },
+    secrets: { VAPI_API_KEY: FAKE_VAPI_KEY, VAPI_WEBHOOK_SECRET: FAKE_WEBHOOK_SECRET, VAPID_PRIVATE_KEY: VAPID.privateKey },
     mainVars: {
       VAPI_API_BASE_URL: mock.base,
+      AI_TEST_BASE_URL: mock.base,
+      VAPID_PUBLIC_KEY: VAPID.publicKey,
       VAPI_ASSISTANT_ID: ASSISTANT_A,
       TEAM_DOMAIN: TEAM,
       POLICY_AUD: AUD,
@@ -154,13 +158,33 @@ await check("1. frontend is served at /vapi-control/ (and / redirects there)", a
   assert.match(res.headers.get("content-type"), /text\/html/);
   assert.match(html, /VAPI LIVE CONTROL/);
   assert.match(res.headers.get("content-security-policy"), /default-src 'self'/);
-  assert.equal(res.headers.get("permissions-policy").includes("microphone=()"), true);
+  // The microphone is allowed for the console itself only (dictation).
+  assert.match(res.headers.get("permissions-policy"), /(^|, )microphone=\(self\)/);
+  assert.match(res.headers.get("permissions-policy"), /camera=\(\)/);
+  assert.match(html, /rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials"/);
   for (const p of ["/", "/vapi-control"]) {
     const r = await fetch(`${MAIN}${p}`, { redirect: "manual", headers: { "Cf-Access-Jwt-Assertion": TOKEN } });
     assert.equal(r.status, 302);
     assert.equal(r.headers.get("location"), "/vapi-control/");
   }
-  for (const asset of ["config.js", "css/app.css", "js/app.js", "js/audio.js", "js/api.js", "js/transcript.js", "js/events.js", "js/format.js"]) {
+  // Installable app: manifest, service worker and icons are served (behind Access like everything else).
+  const manifest = await fetch(`${MAIN}/vapi-control/manifest.webmanifest`, { headers: { "Cf-Access-Jwt-Assertion": TOKEN } });
+  assert.equal(manifest.status, 200);
+  assert.match(manifest.headers.get("content-type"), /manifest\+json|application\/json/);
+  const m = await manifest.json();
+  assert.equal(m.display, "standalone");
+  assert.ok(m.icons.some((i) => i.sizes === "192x192") && m.icons.some((i) => i.sizes === "512x512") && m.icons.some((i) => i.purpose === "maskable"));
+  const sw = await fetch(`${MAIN}/vapi-control/sw.js`, { headers: { "Cf-Access-Jwt-Assertion": TOKEN } });
+  assert.equal(sw.status, 200);
+  assert.match(sw.headers.get("content-type"), /javascript/);
+  await sw.text();
+  for (const icon of [...m.icons.map((i) => i.src), "icons/apple-touch-icon.png", "icons/badge-96.png"]) {
+    const r = await fetch(`${MAIN}/vapi-control/${icon}`, { headers: { "Cf-Access-Jwt-Assertion": TOKEN } });
+    assert.equal(r.status, 200, icon);
+    await r.arrayBuffer();
+  }
+  assert.equal((await fetch(`${MAIN}/vapi-control/sw.js`)).status, 401, "service worker is not public");
+  for (const asset of ["config.js", "css/app.css", "js/app.js", "js/audio.js", "js/api.js", "js/transcript.js", "js/events.js", "js/format.js", "js/dictation.js", "js/push.js", "sw.js"]) {
     const r = await fetch(`${MAIN}/vapi-control/${asset}`, { headers: { "Cf-Access-Jwt-Assertion": TOKEN } });
     assert.equal(r.status, 200, asset);
     bodies.push(await r.text());
@@ -193,6 +217,9 @@ await check("4. Worker reads its environment (Access vars, Vapi key, assistant f
   assert.equal(json.vapiConfigured, true);
   assert.equal(json.assistantFilter, true);
   assert.equal(json.eventsAvailable, true);
+  assert.equal(json.dictation, true);
+  assert.equal(json.translation, true);
+  assert.equal(json.push.publicKey, VAPID.publicKey);
   await api("calls");
   assert.equal(mock.state.listRequests.at(-1).assistantId, ASSISTANT_A);
 });
@@ -216,11 +243,21 @@ await check("5. unauthorized requests are rejected and never reach Vapi", async 
       [`calls/${CALL_1}/end`, "POST", {}],
       [`calls/${CALL_1}/dtmf`, "POST", { keys: "1" }],
       [`calls/${CALL_1}/instruction`, "POST", { text: "x" }],
+      [`calls/${CALL_1}/mode`, "POST", { operator: true, text: "x" }],
+      ["push/subscribe", "POST", { subscription: {} }],
+      ["push/test", "POST", {}],
     ]) {
       const r = await api(p, { method, body, token });
       assert.equal(r.status, expected, `${label} ${method} ${p}`);
       assert.equal(r.json?.ok, false);
     }
+    const audio = await fetch(`${MAIN}/vapi-control/api/transcribe`, {
+      method: "POST",
+      headers: { ...(token ? { "Cf-Access-Jwt-Assertion": token } : {}), Origin: MAIN, "Content-Type": "audio/webm" },
+      body: Buffer.alloc(2000, 1),
+    });
+    assert.equal(audio.status, expected, `${label} transcribe`);
+    await audio.text();
     const page = await fetch(`${MAIN}/vapi-control/`, { headers: token ? { "Cf-Access-Jwt-Assertion": token } : {} });
     assert.equal(page.status, expected, `${label} page`);
     const ws = await openWs(`${MAIN.replace("http", "ws")}/vapi-control/api/calls/${CALL_1}/listen`, { token });
@@ -228,6 +265,7 @@ await check("5. unauthorized requests are rejected and never reach Vapi", async 
   }
   assert.equal(mock.state.controls.length, 0, "no control command may reach Vapi");
   assert.equal(mock.state.listenConnections.length, 0, "no listen connection may reach Vapi");
+  assert.equal(mock.state.aiRequests.length, 0, "no AI request without a valid identity");
 });
 
 await check("6. authorized requests are accepted", async () => {
@@ -350,6 +388,119 @@ await check("19. AI INSTRUCTION is an add-message for this call only (assistant 
   }
   const bad = await api(`calls/${CALL_1}/control`, { method: "POST", body: { action: "say-first-message" } });
   assert.equal(bad.status, 400);
+});
+
+// ------------------------------------------ dictation, translation, mode ---
+await check("dictation: the operator's recording is transcribed (Nova-3, then Whisper); the words are never logged", async () => {
+  const transcribe = (body, { type = "audio/webm;codecs=opus", origin = MAIN, lang = "ru" } = {}) =>
+    fetch(`${MAIN}/vapi-control/api/transcribe?lang=${lang}`, {
+      method: "POST",
+      headers: { "Cf-Access-Jwt-Assertion": TOKEN, Origin: origin, "Content-Type": type },
+      body,
+    });
+  mock.state.aiRequests.length = 0;
+  mock.state.ai.transcript = "Скажи ему, что сто двадцать это дорого";
+  let res = await transcribe(Buffer.alloc(4000, 7));
+  let json = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(json));
+  assert.equal(json.text, "Скажи ему, что сто двадцать это дорого");
+  const stt = mock.state.aiRequests[0];
+  assert.equal(stt.model, "@cf/deepgram/nova-3");
+  assert.equal(stt.input.language, "ru");
+  assert.equal(stt.input.audio.contentType, "audio/webm");
+  assert.equal(Buffer.from(stt.input.audio.body, "base64").length, 4000, "audio reaches the model intact");
+  // Nova-3 hears nothing -> Whisper takes over.
+  mock.state.ai.transcript = "";
+  mock.state.ai.whisperText = "Алло, слышно?";
+  res = await transcribe(Buffer.alloc(4000, 7), { type: "audio/mp4" });
+  json = await res.json();
+  assert.equal(json.text, "Алло, слышно?");
+  assert.deepEqual(mock.state.aiRequests.slice(1).map((r) => r.model), ["@cf/deepgram/nova-3", "@cf/openai/whisper-large-v3-turbo"]);
+  mock.state.ai.transcript = "Скажи, что я подумаю";
+  assert.equal((await transcribe("hello", { type: "text/plain" })).status, 415);
+  assert.equal((await transcribe(Buffer.alloc(10))).status, 400);
+  assert.equal((await transcribe(Buffer.alloc(4000), { origin: "https://evil.example" })).status, 403);
+  assert.equal((await transcribe(Buffer.alloc(5 * 1024 * 1024))).status, 413);
+  assert.ok(main.logs.some((l) => l.includes('"evt":"dictation_transcribed"')));
+  assert.ok(!main.logs.some((l) => l.includes("сто двадцать") || l.includes("слышно")), "dictated words must not be logged");
+});
+
+await check("SAY translates Russian on the server and the caller hears the English line verbatim", async () => {
+  mock.state.controls.length = 0;
+  mock.state.aiRequests.length = 0;
+  mock.state.ai.translations["Скажи, что я подумаю"] = "I'll think about it.";
+  let r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Скажи, что я подумаю", translate: true, language: "English" } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.spoken, "I'll think about it.");
+  assert.equal(r.json.translated, true);
+  assert.deepEqual(mock.state.controls.map((c) => c.payload), [{ type: "say", content: "I'll think about it.", endCallAfterSpoken: false }]);
+  const tr = mock.state.aiRequests.find((q) => q.model === "@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+  assert.match(tr.input.messages[0].content, /English/);
+  assert.equal(tr.input.messages[1].content, "Скажи, что я подумаю");
+  // English (Latin script) is never sent for translation.
+  mock.state.aiRequests.length = 0;
+  r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "I'll call you back.", translate: true } });
+  assert.equal(r.json.translated, false);
+  assert.equal(r.json.spoken, "I'll call you back.");
+  assert.equal(mock.state.aiRequests.length, 0);
+  // Translation down, or an answer still in Russian: nothing reaches the caller.
+  mock.state.controls.length = 0;
+  mock.state.ai.failTranslate = true;
+  r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Привет", translate: true } });
+  assert.equal(r.status, 502);
+  assert.equal(r.json.error.code, "translate_failed");
+  mock.state.ai.failTranslate = false;
+  mock.state.ai.translations["Как дела"] = "Как дела?";
+  r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Как дела", translate: true } });
+  assert.equal(r.json.error.code, "translate_failed");
+  assert.equal(mock.state.controls.length, 0);
+});
+
+await check("operator mode lives on the server: each line unmutes, the hub mutes again when the line is spoken", async () => {
+  const types = () => mock.state.controls.map((c) => (c.payload.type === "control" ? c.payload.control : c.payload.type + (c.payload.triggerResponseEnabled === false ? ":silent" : "")));
+  const events = await openWs(`${MAIN.replace("http", "ws")}/vapi-control/api/events`);
+  await waitFor(() => events.handle.messages.length > 0, { what: "snapshot" });
+  mock.state.controls.length = 0;
+  let r = await api(`calls/${CALL_1}/mode`, { method: "POST", body: { operator: true, text: "[Operator control ON] stay silent", mute: true } });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(types(), ["add-message:silent", "mute-assistant"]);
+  // Every open console (any device) learns the mode.
+  await waitFor(() => events.handle.messages.some((m) => { const x = JSON.parse(m); return x.type === "state" && x.call.callId === CALL_1 && x.call.operator === true; }), { what: "mode broadcast" });
+
+  mock.state.controls.length = 0;
+  r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Hold on a second." } });
+  assert.equal(r.status, 200);
+  assert.deepEqual(types(), ["unmute-assistant", "say"]);
+  assert.equal(mock.state.controls[1].payload.interruptAssistantEnabled, true, "the line replaces queued speech");
+  await webhook({ type: "speech-update", role: "assistant", status: "started", call: { id: CALL_1 }, timestamp: Date.now() });
+  await sleep(600);
+  assert.deepEqual(types(), ["unmute-assistant", "say"], "not muted while the line is being spoken");
+  await webhook({ type: "speech-update", role: "assistant", status: "stopped", call: { id: CALL_1 }, timestamp: Date.now() });
+  await waitFor(() => types().length === 3, { what: "re-mute after the line", timeout: 3000 });
+  assert.equal(types()[2], "mute-assistant");
+  assert.ok(main.logs.some((l) => l.includes('"evt":"assistant_remuted"') && l.includes("speech_stopped")));
+
+  // No speech events at all: the estimate re-mutes anyway.
+  mock.state.controls.length = 0;
+  await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Yes." } });
+  assert.deepEqual(types(), ["unmute-assistant", "say"]);
+  await waitFor(() => types().length === 3, { what: "re-mute by estimate", timeout: 8000 });
+  assert.equal(types()[2], "mute-assistant");
+
+  // The translation fallback (the model speaks the line) is a line too.
+  mock.state.controls.length = 0;
+  await api(`calls/${CALL_1}/instruction`, { method: "POST", body: { text: "[Operator dictation] Say: «Я подумаю»", line: true } });
+  assert.deepEqual(types(), ["unmute-assistant", "add-message"]);
+
+  // Hand back: silent note + unmute; afterwards lines leave mute alone.
+  mock.state.controls.length = 0;
+  r = await api(`calls/${CALL_1}/mode`, { method: "POST", body: { operator: false, text: "[Operator control OFF]", mute: true } });
+  assert.deepEqual(types(), ["add-message:silent", "unmute-assistant"]);
+  mock.state.controls.length = 0;
+  await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Thanks." } });
+  await sleep(300);
+  assert.deepEqual(types(), ["say"]);
+  events.handle.ws.close();
 });
 
 await check("20. DTMF is refused (409) when the assistant has no dtmf tool; nothing is sent", async () => {
@@ -540,6 +691,77 @@ await check("events socket requires Access and an allowed origin", async () => {
   assert.equal((await openWs(`${MAIN.replace("http", "ws")}/vapi-control/api/events`, { origin: "https://evil.example" })).opened, false);
 });
 
+// ------------------------------------------------------------ web push ---
+const PHONE = fakeSubscription(`${mock.base}/push/phone`);
+const TABLET = fakeSubscription(`${mock.base}/push/tablet`);
+
+await check("Web Push: a device subscribes; its test alert is encrypted for it and signed with VAPID", async () => {
+  let r = await api("push/subscribe", { method: "POST", body: { subscription: PHONE.subscription, label: "Android · Chrome" } });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.devices, 1);
+  r = await api("push/subscribe", { method: "POST", body: { subscription: { ...PHONE.subscription, endpoint: "https://evil.example/push" } } });
+  assert.equal(r.status, 400, "unknown push services are refused");
+  r = await api("push/subscribe", { method: "POST", body: { subscription: PHONE.subscription }, origin: "https://evil.example" });
+  assert.equal(r.status, 403);
+  mock.state.pushes.length = 0;
+  r = await api("push/test", { method: "POST", body: { endpoint: PHONE.subscription.endpoint } });
+  assert.equal(r.json.sent, 1);
+  const p = mock.state.pushes[0];
+  assert.equal(p.device, "phone");
+  assert.equal(p.headers["content-encoding"], "aes128gcm");
+  assert.equal(p.headers.urgency, "high");
+  assert.ok(Number(p.headers.ttl) > 0);
+  const claims = verifyVapid(p.headers.authorization, VAPID);
+  assert.equal(claims.aud, mock.base);
+  const msg = PHONE.decrypt(p.body);
+  assert.equal(msg.type, "test");
+  assert.ok(!p.body.toString("latin1").includes("Test alert"), "payload is encrypted");
+});
+
+await check("Web Push: a new call alerts every device once; devices the push service drops are removed", async () => {
+  await api("push/subscribe", { method: "POST", body: { subscription: TABLET.subscription, label: "iPhone/iPad · Safari (app)" } });
+  mock.state.pushes.length = 0;
+  const NEW = "aaaaaaaa-0000-4000-8000-00000000000a";
+  await webhook({ type: "status-update", status: "ringing", call: { id: NEW, type: "inboundPhoneCall", customer: { number: "+15557654321" } }, timestamp: Date.now() });
+  await waitFor(() => mock.state.pushes.length >= 2, { what: "alerts to both devices" });
+  const byDevice = Object.fromEntries(mock.state.pushes.map((p) => [p.device, p]));
+  for (const [device, sub] of [["phone", PHONE], ["tablet", TABLET]]) {
+    const alert = sub.decrypt(byDevice[device].body);
+    assert.equal(alert.type, "call");
+    assert.equal(alert.callId, NEW);
+    assert.equal(alert.title, "📞 Incoming call");
+    assert.match(alert.body, /\+15557654321/);
+    assert.equal(alert.url, `./?call=${NEW}`);
+  }
+  assert.equal(byDevice.phone.headers.topic, NEW.replace(/-/g, ""));
+  // Further events of the same call do not alert again.
+  await webhook({ type: "status-update", status: "in-progress", call: { id: NEW }, timestamp: Date.now() });
+  await webhook({ type: "speech-update", role: "user", status: "started", call: { id: NEW }, timestamp: Date.now() });
+  await webhook({ type: "conversation-update", call: { id: NEW }, timestamp: Date.now(), messages: [] });
+  await sleep(600);
+  assert.equal(mock.state.pushes.length, 2);
+  // A late report of a call that already ended is no reason to alert.
+  await webhook({ type: "end-of-call-report", endedReason: "hangup", call: { id: "aaaaaaaa-0000-4000-8000-00000000000c" }, timestamp: Date.now() });
+  await sleep(300);
+  assert.equal(mock.state.pushes.length, 2);
+
+  // The push service reports the tablet gone (410): it is dropped.
+  mock.state.pushStatus.tablet = 410;
+  mock.state.pushes.length = 0;
+  const NEW2 = "aaaaaaaa-0000-4000-8000-00000000000b";
+  await webhook({ type: "status-update", status: "in-progress", call: { id: NEW2 }, timestamp: Date.now() });
+  await waitFor(() => mock.state.pushes.length >= 2, { what: "second call alerts" });
+  await waitFor(() => main.logs.some((l) => l.includes('"evt":"push_sent"') && l.includes('"removed":1')), { what: "gone device removed" });
+  mock.state.pushes.length = 0;
+  let r = await api("push/test", { method: "POST", body: {} });
+  assert.equal(r.json.sent, 1, "only the phone is left");
+  await api("push/unsubscribe", { method: "POST", body: { endpoint: PHONE.subscription.endpoint } });
+  r = await api("push/test", { method: "POST", body: {} });
+  assert.equal(r.json.sent, 0);
+  assert.ok(!main.logs.some((l) => l.includes("/push/phone") || l.includes("/push/tablet")), "push endpoints are not logged");
+  for (const id of [NEW, NEW2]) await webhook({ type: "status-update", status: "ended", endedReason: "test", call: { id }, timestamp: Date.now() });
+});
+
 // ------------------------------------------------------ 29 Vapi errors ---
 await check("29. Vapi failures become concise JSON errors (5xx, auth failure, not found)", async () => {
   mock.state.failList = 500;
@@ -567,7 +789,7 @@ await check("29. Vapi failures become concise JSON errors (5xx, auth failure, no
 await check("30. no secret appears in any response, header or Worker log", async () => {
   await sleep(500);
   const haystack = [bodies.join("\n"), main.logs.join("\n"), hook.logs.join("\n")].join("\n");
-  for (const secret of [FAKE_VAPI_KEY, FAKE_WEBHOOK_SECRET, TOKEN]) assert.ok(!haystack.includes(secret), `leaked: ${secret.slice(0, 12)}…`);
+  for (const secret of [FAKE_VAPI_KEY, FAKE_WEBHOOK_SECRET, TOKEN, VAPID.privateKey]) assert.ok(!haystack.includes(secret), `leaked: ${secret.slice(0, 12)}…`);
   const logText = [main.logs.join("\n"), hook.logs.join("\n")].join("\n");
   assert.ok(!/\/control\/|\/listen\/[^\s]*\/transport/.test(logText.replace(/vapi-control\/api\/calls\/[^\s"]+/g, "")), "monitor URLs must not be logged");
   for (const evt of ["active_call_detected", "call_selected", "say_requested", "say_and_hangup_requested", "ai_instruction_requested", "dtmf_requested", "end_call_requested", "listen_connection_established", "vapi_api_error", "call_ended"]) {

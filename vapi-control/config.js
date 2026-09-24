@@ -26,12 +26,15 @@ window.VAPI_CONTROL_CONFIG = {
     hiddenMultiplier: 4, // background tab
   },
 
-  // Alert when a new call appears. Desktop notifications need one-time
-  // permission — the bell in the header asks for it.
+  // Alert when a new call appears. Notifications need one-time permission —
+  // "Enable sound & alerts" / "🔔 Alerts" in the header ask for it.
   notify: {
     sound: true,
     desktop: true,
     titleBadge: true, // mark the browser tab title during a call
+    // Web Push: alerts also arrive with the console closed (the Worker sends
+    // them). On iPhone only for the console added to the Home Screen.
+    push: true,
   },
 
   // How long "CALL ENDED" stays visible before returning to NO ACTIVE CALL.
@@ -45,21 +48,22 @@ window.VAPI_CONTROL_CONFIG = {
     tool: "TOOL",
   },
 
-  // EXACT SAY: text is spoken verbatim by the assistant's configured voice.
+  // SAY TO CALLER: text is spoken verbatim by the assistant's configured voice.
   say: {
     // Default state of the "Interrupt bot" checkbox (replace current bot speech).
     interruptAssistantByDefault: false,
     clearAfterSend: true,
 
-    // "Translate" checkbox. Vapi's say command is verbatim, so it cannot
-    // translate: with the box ticked the line is handed to the model instead,
-    // which speaks it in targetLanguage. Wording may therefore differ slightly
-    // from a literal translation. {text} and {language} are substituted.
+    // "Translate" checkbox. Lines containing non-Latin script (e.g. Russian)
+    // are translated on the server (Cloudflare Workers AI) and the English
+    // result is spoken verbatim — the console shows exactly what was said.
+    // English text is spoken as typed.
     translate: {
-      // On by default. Only lines containing non-Latin script (e.g. Russian)
-      // go through the model; English text is still spoken verbatim.
       enabledByDefault: true,
       targetLanguage: "English",
+      // Fallback only, if the translation service fails: the line is handed
+      // to the call's own model to translate and speak. {text} and
+      // {language} are substituted.
       template:
         "[Operator dictation] Say this to the caller right now, in {language}: «{text}»\n" +
         "Translate it faithfully, keep the meaning, tone and any numbers exactly, and add nothing of your own. " +
@@ -67,20 +71,25 @@ window.VAPI_CONTROL_CONFIG = {
     },
   },
 
+  // DICTATE button: speak (Russian by default), the line is recognised on
+  // the server, translated and said to the caller in English.
+  dictation: {
+    language: "ru", // language you speak (BCP-47 code)
+    autoSend: true, // default of "Send dictation right away"; off = text goes into the box to edit first
+    maxSeconds: 45, // a recording stops by itself after this
+  },
+
   // OPERATOR MODE. Vapi has no "hand the call to a human" switch, so this puts
   // the model into a relay role with a system message: it stops improvising and
-  // only voices what you send with EXACT SAY. Nothing about the saved assistant
-  // changes — the instruction lives in this call and dies with it.
+  // only voices what you send with SAY TO CALLER. Nothing about the saved
+  // assistant changes — the instruction lives in this call and dies with it.
+  // The mode is stored on the server, so every device sees it.
   operatorMode: {
-    // Also send Vapi's documented mute-assistant control while you drive, and
-    // unmute only for the moment your own line is spoken. The instruction
-    // alone is advisory — the model may still answer if you pause.
+    // Also send Vapi's documented mute-assistant control while you drive. The
+    // server unmutes the assistant only for your own line and mutes it again
+    // when Vapi reports the line was spoken. The instruction alone is
+    // advisory — the model may still answer if you pause.
     useMute: true,
-    // Re-mute after an operator line: when the assistant's speech-update
-    // "stopped" event arrives, or after this estimate, whichever is first.
-    charsPerSecond: 14,
-    extraMs: 1500,
-    translatedExtraMs: 2500,
     enterText:
       "[Operator control ON] A human operator is now conducting this call personally. " +
       "From this moment: do not speak on your own initiative, do not answer the other party, " +

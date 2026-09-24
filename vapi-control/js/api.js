@@ -14,13 +14,13 @@ export class ApiError extends Error {
 export function createApi(baseUrl) {
   const base = new URL(baseUrl, window.location.href);
 
-  async function request(path, { method = "GET", body } = {}) {
+  async function request(path, { method = "GET", body, blob } = {}) {
     let res;
     try {
       res = await fetch(new URL(path, base), {
         method,
-        headers: body ? { "Content-Type": "application/json" } : {},
-        body: body ? JSON.stringify(body) : undefined,
+        headers: blob ? { "Content-Type": blob.type.split(";")[0] || "application/octet-stream" } : body ? { "Content-Type": "application/json" } : {},
+        body: blob || (body ? JSON.stringify(body) : undefined),
         credentials: "same-origin",
         cache: "no-store",
         // An expired Access session answers with a redirect to the login page.
@@ -62,10 +62,15 @@ export function createApi(baseUrl) {
     session: () => request("session"),
     calls: () => request("calls"),
     call: (id, { select = false } = {}) => request(`${callPath(id)}${select ? "?select=1" : ""}`),
-    say: (id, text, { endCallAfterSpoken = false, interruptAssistant = false } = {}) =>
-      request(callPath(id, "say"), { method: "POST", body: { text, endCallAfterSpoken, interruptAssistant } }),
-    instruction: (id, text, { triggerResponse = true } = {}) =>
-      request(callPath(id, "instruction"), { method: "POST", body: { text, triggerResponse } }),
+    say: (id, text, { endCallAfterSpoken = false, interruptAssistant = false, translate = false, language } = {}) =>
+      request(callPath(id, "say"), { method: "POST", body: { text, endCallAfterSpoken, interruptAssistant, translate, language } }),
+    instruction: (id, text, { triggerResponse = true, line = false } = {}) =>
+      request(callPath(id, "instruction"), { method: "POST", body: { text, triggerResponse, line } }),
+    mode: (id, { operator, text, mute }) => request(callPath(id, "mode"), { method: "POST", body: { operator, text, mute } }),
+    transcribe: (blob, lang) => request(`transcribe?lang=${encodeURIComponent(lang || "ru")}`, { method: "POST", blob }),
+    pushSubscribe: (subscription, label) => request("push/subscribe", { method: "POST", body: { subscription, label } }),
+    pushUnsubscribe: (endpoint) => request("push/unsubscribe", { method: "POST", body: { endpoint } }),
+    pushTest: (endpoint) => request("push/test", { method: "POST", body: { endpoint } }),
     phrases: () => request("phrases"),
     savePhrases: (phrases) => request("phrases", { method: "PUT", body: { phrases } }),
     control: (id, action) => request(callPath(id, "control"), { method: "POST", body: { action } }),

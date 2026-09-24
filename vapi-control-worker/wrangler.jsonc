@@ -27,6 +27,11 @@
   "durable_objects": {
     "bindings": [{ "name": "HUB", "class_name": "CallHub" }]
   },
+
+  // Workers AI: operator dictation (speech -> text) and Russian -> English
+  // translation of operator lines. Billed to this Cloudflare account; a
+  // day's normal use fits in the free daily allowance.
+  "ai": { "binding": "AI" },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CallHub"] }],
 
   "vars": {
@@ -44,7 +49,15 @@
     // parameter of the login redirect and update it here.
     "POLICY_AUD": "9cf2a994daa261f6f0f33ae08823393a5691fb9a6030d21e38b8414d796ce66f",
     // Independent allowlist, enforced by the Worker on top of the Access policy.
-    "ALLOWED_EMAILS": "geofakt@gmail.com"
+    "ALLOWED_EMAILS": "geofakt@gmail.com",
+
+    // Web Push (call alerts with no console tab open). The public half of the
+    // VAPID key pair; the private half is the secret VAPID_PRIVATE_KEY. A new
+    // pair invalidates every device's alert subscription (each device then
+    // re-subscribes on its next visit).
+    "VAPID_PUBLIC_KEY": "BFaBLwX5NMzio9Bh_ifzi7rnG4XhQlH7tubJ4afF5JJf2U237lNn_wGoEMveQTK5S1ndlIQCu4PKu1TSexeGQCo",
+    // Contact shown to the push services (Google, Apple, Mozilla, Microsoft).
+    "VAPID_SUBJECT": "https://kidletto.com"
   },
 
   // Structured logs from the code only. Automatic invocation logs are off:

@@ -17,13 +17,39 @@
 - Автоматически находит активные звонки (без ввода Call ID), показывает список, если их несколько.
 - Таймер по реальному `startedAt` звонка из Vapi (с поправкой на расхождение часов браузера и сервера).
 - Живой транскрипт PROVIDER / ASSISTANT (события Vapi через webhook), без дублей; interim-фразы показываются курсивом.
-- LISTEN — живое аудио звонка (`monitor.listenUrl`), без доступа к микрофону.
-- EXACT SAY — фраза произносится дословно голосом ассистента (`say`), Ctrl+Enter.
-- SAY & HANG UP — фраза, затем завершение звонка штатным `endCallAfterSpoken` (без таймеров JS).
+- LISTEN — живое аудио звонка (`monitor.listenUrl`); включается само.
+- SAY TO CALLER — фраза произносится дословно голосом ассистента (`say`), Ctrl+Enter.
+  Русский текст сначала переводится на сервере (Workers AI, Llama 3.3 70B), и звонку
+  уходит готовая английская фраза — консоль показывает, что именно прозвучало.
+- DICTATE (🎤) — оператор говорит по-русски, речь распознаётся на сервере (Workers AI,
+  Deepgram Nova-3, запасной — Whisper), переводится и произносится по-английски.
+  Микрофон включается только нажатием и отпускается сразу после записи.
+- SAY & HANG UP — фраза (тоже с переводом), затем завершение звонка штатным `endCallAfterSpoken`.
+- TAKE OVER — режим оператора: ассистент заглушён (`mute-assistant`) и получает указание молчать;
+  каждая фраза оператора размьючивает его ровно на время фразы, затем сервер глушит его снова
+  (по событию `speech-update stopped` или по оценке длительности). Режим хранится на сервере —
+  его видят все устройства, он переживает перезагрузку страницы.
 - AI INSTRUCTION — инструкция модели только для текущего звонка (`add-message`, role `system`); можно писать по-русски.
-- QUICK PHRASES — настраиваемые кнопки (`vapi-control/config.js`).
+- QUICK PHRASES — настраиваемые кнопки (редактируются в консоли, хранятся на сервере).
 - END CALL — с подтверждением (`end-call`).
+- Оповещения о звонке (Web Push) — уведомление со звуком устройства, даже когда консоль закрыта;
+  консоль устанавливается как приложение (PWA) на телефон и компьютер.
+- На телефоне сверху — DICTATE и быстрые фразы, ниже транскрипт и остальное.
 - DTMF — см. §4 и §14: прямой DTMF от оператора Vapi **не поддерживает**; клавиатура включается только если у ассистента есть встроенный инструмент `dtmf`.
+
+### Оповещения и приложение на телефоне
+
+- **Android (Chrome):** открыть консоль → меню ⋮ → «Установить приложение» (или кнопка
+  «⬇ Install app» в шапке) → открыть Vapi Control с рабочего стола → «🔔 Alerts» →
+  Turn on alerts → Send test alert.
+- **iPhone (Safari, iOS 16.4+):** Поделиться → «На экран Домой» → открыть Vapi Control
+  с экрана «Домой» → «🔔 Alerts» → Turn on alerts. В обычной вкладке Safari web push не работает.
+- **Компьютер (Chrome/Edge):** «🔊 Enable sound & alerts» или «🔔 Alerts» → разрешить
+  уведомления. Оповещения приходят, пока браузер запущен, даже если вкладка консоли закрыта.
+  «⬇ Install app» ставит консоль отдельным окном.
+- Срок входа Cloudflare Access (по умолчанию 24 ч) задаётся в Zero Trust → Access →
+  Applications → приложение → Session duration; для приложения на телефоне удобно поставить
+  неделю или месяц, иначе после клика по оповещению придётся заново вводить код из письма.
 
 ## 2. Архитектура
 
@@ -64,13 +90,19 @@ vapi-control/                 фронтенд (статика; раздаётс
   js/events.js                WebSocket событий с переподключением
   js/transcript.js            модель транскрипта (partial/final/commit, дедупликация)
   js/audio.js                 плеер listen-потока + автоопределение формата PCM
+  js/dictation.js             запись голоса оператора (MediaRecorder) для DICTATE
+  js/push.js                  service worker, подписка на Web Push, установка приложения
   js/format.js
+  sw.js                       service worker: показывает оповещения о звонках
+  manifest.webmanifest, icons/   установка как приложение (PWA)
 vapi-control-worker/
   src/index.js                Worker консоли: роутинг, API, прокси listen
   src/auth.js                 проверка Cloudflare Access JWT (RS256, WebCrypto)
   src/vapi.js                 клиент Vapi API / controlUrl / listenUrl
   src/calls.js                фильтры звонков, санитизация, DTMF-возможности
-  src/hub.js                  Durable Object CallHub (живые события → браузеры)
+  src/hub.js                  Durable Object CallHub (живые события → браузеры, режим оператора, push-подписки)
+  src/ai.js                   Workers AI: распознавание диктовки, перевод фраз
+  src/push.js                 Web Push: VAPID (RFC 8292) + шифрование aes128gcm (RFC 8291)
   src/events.js               санитизация Vapi webhook-событий
   src/webhook.js              Worker-ingress для Vapi Server URL
   src/http.js, src/log.js     заголовки безопасности, CORS/Origin, логи с редактированием секретов
@@ -122,8 +154,11 @@ API (все пути под `/vapi-control/api/`, каждый запрос — 
 | GET | `session` | email оператора, серверное время, состояние конфигурации |
 | GET | `calls` | активные звонки (без monitor URL, промптов, стоимости) |
 | GET | `calls/:id` | один звонок + возможности (control/listen/dtmf) |
-| POST | `calls/:id/say` | `{text, endCallAfterSpoken?, interruptAssistant?}` |
-| POST | `calls/:id/instruction` | `{text}` |
+| POST | `calls/:id/say` | `{text, endCallAfterSpoken?, interruptAssistant?, translate?}` → `{spoken}` |
+| POST | `calls/:id/instruction` | `{text, triggerResponse?, line?}` |
+| POST | `calls/:id/mode` | `{operator, text, mute?}` — режим оператора |
+| POST | `transcribe` | аудио (webm/ogg/mp4) → `{text}` |
+| POST | `push/subscribe`, `push/unsubscribe`, `push/test` | оповещения Web Push |
 | POST | `calls/:id/dtmf` | `{keys}` — только если у ассистента есть `dtmf` tool |
 | POST | `calls/:id/end` | завершить звонок |
 | WS | `calls/:id/listen` | аудио (прокси `listenUrl`) |
@@ -153,6 +188,15 @@ API (все пути под `/vapi-control/api/`, каждый запрос — 
 | `VAPI_ASSISTANT_ID` | Variable | нет | UUID — показывать/управлять только звонками этого ассистента |
 | `VAPI_PUBLIC_KEY` | Secret | нет | только если включена аутентификация monitor URL |
 | `ALLOWED_ORIGINS` | Variable (в wrangler.jsonc) | уже задана | `https://kidletto.com` |
+| `VAPID_PUBLIC_KEY` | Variable (в wrangler.jsonc) | для оповещений | публичная половина VAPID-ключа (base64url) |
+| `VAPID_PRIVATE_KEY` | Secret | для оповещений | приватная половина (base64url, 32 байта). Без неё кнопка «Alerts» не появляется |
+| `VAPID_SUBJECT` | Variable (в wrangler.jsonc) | нет | контакт для push-сервисов, по умолчанию `https://kidletto.com` |
+| `AI` | binding (в wrangler.jsonc) | для DICTATE и перевода | Workers AI; ключ не нужен, оплата — аккаунт Cloudflare |
+
+Новая пара VAPID-ключей (если приватный ключ утёк):
+`node -e "const c=require('crypto');const j=c.generateKeyPairSync('ec',{namedCurve:'prime256v1'}).privateKey.export({format:'jwk'});console.log('public',Buffer.concat([Buffer.from([4]),Buffer.from(j.x,'base64url'),Buffer.from(j.y,'base64url')]).toString('base64url'));console.log('private',j.d)"`
+— public в `wrangler.jsonc`, private — `npx wrangler secret put VAPID_PRIVATE_KEY`. Устройства
+переподпишутся сами при следующем открытии консоли.
 
 Почему `TEAM_DOMAIN` нельзя опустить: по ней Worker берёт публичные ключи
 Cloudflare (`<team>/cdn-cgi/access/certs`). Если брать домен из самого токена,
@@ -182,6 +226,7 @@ Secrets → Add → Type: Secret**, или из терминала:
 ```bash
 cd vapi-control-worker
 npx wrangler secret put VAPI_API_KEY
+npx wrangler secret put VAPID_PRIVATE_KEY
 npx wrangler secret put VAPI_WEBHOOK_SECRET -c wrangler.webhook.jsonc
 npx wrangler secret put WEBHOOK_FORWARD_URL -c wrangler.webhook.jsonc
 ```
@@ -286,9 +331,9 @@ assistant → phone number → organization). То есть события **э�
 ```bash
 cd vapi-control-worker
 npm test              # unit + integration + ui
-npm run test:unit     # 41 тест: JWT, санитизация, CORS, логи, транскрипт, аудио, таймер
-npm run test:integration   # 26 проверок: оба Worker в workerd + мок Vapi + реальная проверка JWT
-npm run test:ui       # 16 проверок в headless Chrome (нужен Chrome или Edge)
+npm run test:unit     # 47 тестов: JWT, санитизация, CORS, логи, транскрипт, аудио, таймер, Web Push (вектор RFC 8291)
+npm run test:integration   # 31 проверка: оба Worker в workerd + мок Vapi/Workers AI/push-сервиса + реальная проверка JWT
+npm run test:ui       # 23 проверки в headless Chrome (нужен Chrome или Edge; фейковый микрофон Chrome для DICTATE)
 ```
 
 Результаты и скриншоты — `test-results/` (в `.gitignore`).
@@ -323,6 +368,11 @@ npm run test:ui       # 16 проверок в headless Chrome (нужен Chrom
 | «Events: offline» / нет транскрипта | не настроен §11.3; проверьте `wrangler tail kidletto-vapi-control-webhook` |
 | Искажённый звук | выберите формат вручную (Format) |
 | Нужны и Telegram-отчёты, и консоль | задайте секрет `WEBHOOK_FORWARD_URL` = прежний Server URL |
+| Нет кнопки «🔔 Alerts» | не задан секрет `VAPID_PRIVATE_KEY` (или `VAPID_PUBLIC_KEY`) |
+| Оповещения не приходят при закрытой консоли | «🔔 Alerts» → Send test alert. iPhone: только из приложения на экране «Домой». Windows: разрешить уведомления Chrome/Edge в Параметры → Система → Уведомления; браузер должен работать в фоне. Лог: событие `push_sent` |
+| DICTATE: «Microphone access is blocked» | разрешить микрофон для сайта (значок замка у адреса) |
+| DICTATE: «Dictation is not configured» | нет binding `AI` в `wrangler.jsonc` |
+| Перевод недоступен | фраза уходит модели ассистента (как раньше), в консоли — предупреждение; лог `control_command_failed`/ошибка `translate_failed` |
 | Логи | `npx wrangler tail kidletto-vapi-control` или Dashboard → Workers → Logs |
 
 ## 14. Известные ограничения
@@ -336,5 +386,12 @@ npm run test:ui       # 16 проверок в headless Chrome (нужен Chrom
 - Серверный лог фиксирует установку listen-соединения; обрыв виден в консоли
   (Reconnecting/Error), а не в логе Worker: поток проксируется runtime без JS.
 - `say` с `interruptAssistant=false` (по умолчанию) ставится в очередь после текущей речи бота.
+- Оповещения используют системный звук уведомлений устройства; свой рингтон браузеры для
+  web-уведомлений не позволяют. На iPhone web push работает только для консоли, добавленной
+  на экран «Домой» (iOS 16.4+). На компьютере браузер должен быть запущен (хотя бы в фоне).
+- Перевод выполняет LLM: смысл, числа и имена сохраняются, но формулировка может быть
+  не дословной. Произнесённая английская фраза всегда видна в консоли.
+- Режим оператора: между фразами ассистент заглушён; повторное глушение делает сервер по
+  событию `speech-update` (или по оценке длительности, если событий нет).
 - Список звонков смотрит на 3 часа назад (`LOOKBACK_MS` в `src/calls.js`).
 - Пока kidletto.com не в Cloudflare, адрес консоли — `*.workers.dev` (вход с kidletto.com — переадресацией).

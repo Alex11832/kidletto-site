@@ -64,13 +64,18 @@ test("webhook events are sanitized: no monitor URLs, prompts or customer data", 
 });
 
 test("status, transcript and speech events", () => {
-  assert.deepEqual(sanitizeServerMessage({ message: { type: "status-update", status: "ended", endedReason: "customer-ended-call", call, timestamp: 5 } }), {
+  // Status events carry who is calling (for the new-call alert), nothing else.
+  const status = sanitizeServerMessage({ message: { type: "status-update", status: "ended", endedReason: "customer-ended-call", call, timestamp: 5 } });
+  assert.deepEqual(status, {
     callId: CALL_ID,
     at: 5,
     kind: "status",
     status: "ended",
     endedReason: "customer-ended-call",
+    customerNumber: "+15551234567",
+    direction: "inbound",
   });
+  assert.ok(!JSON.stringify(status).includes("vapi.ai") && !JSON.stringify(status).includes("secret prompt"));
   const partial = sanitizeServerMessage({ message: { type: "transcript", role: "user", transcriptType: "partial", transcript: "How ma", call, timestamp: 6 } });
   assert.equal(partial.transcriptType, "partial");
   const final = sanitizeServerMessage({ message: { type: 'transcript[transcriptType="final"]', role: "assistant", transcript: "One.", call, timestamp: 7 } });

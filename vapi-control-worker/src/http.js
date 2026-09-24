@@ -10,9 +10,9 @@ export class HttpError extends Error {
   }
 }
 
-// Applied to every response the control panel Worker produces. The page never
-// needs the microphone, camera or third-party scripts, so the browser is told
-// to refuse them outright.
+// Applied to every response the control panel Worker produces. The
+// microphone is allowed for the console itself only (operator dictation, on
+// an explicit click); camera, third-party scripts and framing are refused.
 export const SECURITY_HEADERS = {
   "Content-Security-Policy": [
     "default-src 'self'",
@@ -22,12 +22,14 @@ export const SECURITY_HEADERS = {
     "media-src 'self' blob:",
     "connect-src 'self'",
     "font-src 'self'",
+    "worker-src 'self'",
+    "manifest-src 'self'",
     "object-src 'none'",
     "base-uri 'none'",
     "form-action 'none'",
     "frame-ancestors 'none'",
   ].join("; "),
-  "Permissions-Policy": "microphone=(), camera=(), geolocation=(), payment=(), usb=()",
+  "Permissions-Policy": "microphone=(self), camera=(), geolocation=(), payment=(), usb=()",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
@@ -77,6 +79,14 @@ export async function readJsonBody(request) {
   } catch {
     throw new HttpError(400, "invalid_json", "Request body is not valid JSON.");
   }
+}
+
+export async function readBytesBody(request, maxBytes, what = "Request body") {
+  const declared = Number(request.headers.get("Content-Length") || 0);
+  if (declared > maxBytes) throw new HttpError(413, "payload_too_large", `${what} is too large.`);
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.length > maxBytes) throw new HttpError(413, "payload_too_large", `${what} is too large.`);
+  return bytes;
 }
 
 export function parseList(value) {

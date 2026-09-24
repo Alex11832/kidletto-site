@@ -2,9 +2,11 @@
 //
 // Data flow:
 //   poll   GET api/calls every few seconds  -> active call list (authoritative)
-//   events WS  api/events                   -> live transcript / speech / status
+//   events WS  api/events                   -> live transcript / speech / status / operator mode
 //   listen WS  api/calls/:id/listen         -> call audio (only while LISTEN is on)
-//   commands POST api/calls/:id/...         -> say / instruction / dtmf / end
+//   commands POST api/calls/:id/...         -> say / instruction / mode / dtmf / end
+//   dictate  POST api/transcribe            -> operator's recorded voice -> text
+//   alerts   sw.js + api/push/...           -> Web Push call alerts, console closed or not
 //
 // Safety rules:
 //   - A command always targets the call ID shown under CONTROLLING at the
@@ -17,11 +19,13 @@ import { EventsClient } from "./events.js";
 import { ListenPlayer, describeFormat, FORMAT_PRESETS } from "./audio.js";
 import { applyHubMessage, createTranscriptStore, speakingRoles, transcriptView } from "./transcript.js";
 import { callElapsedMs, clockTime, directionLabel, formatDuration, shortId, statusLabel } from "./format.js";
+import { Recorder, dictationSupported } from "./dictation.js";
+import { currentSubscription, disablePush, enablePush, isIos, isStandalone, pushSupported, registerServiceWorker } from "./push.js";
 
 const DEFAULTS = {
   apiBase: "api/",
   poll: { liveMs: 0, fallbackMs: 30000, hiddenMultiplier: 4 },
-  notify: { sound: true, desktop: true, titleBadge: true },
+  notify: { sound: true, desktop: true, titleBadge: true, push: true },
   endedBannerMs: 5000,
   labels: { user: "PROVIDER", assistant: "ASSISTANT", system: "INSTRUCTION", tool: "TOOL" },
   say: {
@@ -29,7 +33,8 @@ const DEFAULTS = {
     clearAfterSend: true,
     translate: { enabledByDefault: true, targetLanguage: "English", template: "{text}" },
   },
-  operatorMode: { useMute: true, charsPerSecond: 14, extraMs: 1500, translatedExtraMs: 2500, enterText: "", leaveText: "" },
+  dictation: { language: "ru", autoSend: true, maxSeconds: 45 },
+  operatorMode: { useMute: true, enterText: "", leaveText: "" },
   aiInstruction: { template: "{instruction}", clearAfterSend: true },
   quickPhrases: [],
   dtmf: { pauseBetweenDigits: "w", sendOnPress: false, maxLength: 32 },
@@ -98,16 +103,23 @@ const state = {
   audioFormatKey: loadPref("audioFormat", cfg.listen.defaultFormat),
   volume: Number(loadPref("volume", cfg.listen.volume)) || 1,
   endTarget: null,
-  // Call IDs the operator has taken over. Kept per call so switching calls
-  // never silently carries the mode across.
-  manualCalls: new Set(),
   notifiedCalls: new Set(),
-  remute: null, // { callId, timer } while an operator line is being spoken
   fetchingCalls: new Set(),
   // Browsers allow audio only after the operator has clicked the page once.
   audioUnlocked: false,
   sharedAudio: null,
   phrases: null, // null = config defaults; else the list saved on the server
+  // Dictation: idle | starting | recording | working
+  dictation: { phase: "idle", recorder: null, status: "", error: false, timer: null },
+  autoSend: loadPref("autoSendDictation", cfg.dictation.autoSend ? "1" : "0") === "1",
+  lastLine: null, // { heard, spoken }
+  // Alerts / install
+  swReg: null,
+  pushKey: null,
+  pushOn: false,
+  installPrompt: null,
+  // Call named by an alert click (?call=… or a service-worker message).
+  wantedCallId: null,
 };
 if (!(state.audioFormatKey in FORMAT_PRESETS)) state.audioFormatKey = "auto";
 
@@ -117,6 +129,21 @@ const el = {
   timer: $("timer"),
   eventsPill: $("eventsPill"),
   enableNotify: $("enableNotify"),
+  alertsBtn: $("alertsBtn"),
+  installBtn: $("installBtn"),
+  alertsDialog: $("alertsDialog"),
+  alertsStatus: $("alertsStatus"),
+  alertsHint: $("alertsHint"),
+  alertsEnable: $("alertsEnable"),
+  alertsTest: $("alertsTest"),
+  alertsDisable: $("alertsDisable"),
+  alertsClose: $("alertsClose"),
+  micBtn: $("micBtn"),
+  micLabel: $("micLabel"),
+  micCancel: $("micCancel"),
+  micStatus: $("micStatus"),
+  autoSendDictation: $("autoSendDictation"),
+  lastLine: $("lastLine"),
   editPhrases: $("editPhrases"),
   phraseDialog: $("phraseDialog"),
   phraseRows: $("phraseRows"),
@@ -176,6 +203,12 @@ function selectedCall() {
 function canControl() {
   const call = selectedCall();
   return Boolean(call && call.status === "in-progress" && state.caps?.control && state.capsStatus === "in-progress" && !state.fatal);
+}
+
+// Operator mode is kept per call by the server (hub), so it is the same in
+// every browser and on every device, and survives a page reload.
+function isManual(id) {
+  return Boolean(id && store.calls.get(id)?.operator);
 }
 
 function toast(message, kind = "info", ms = 4500) {
@@ -266,7 +299,18 @@ function updateCalls(calls) {
 }
 
 function autoSelect() {
-  if (state.selectedId || state.ended || state.fatal) return;
+  if (state.fatal) return;
+  // A call named by a clicked alert is selected even among several.
+  const wanted = state.wantedCallId && state.calls.find((c) => c.id === state.wantedCallId);
+  if (wanted) {
+    state.wantedCallId = null;
+    if (state.selectedId !== wanted.id) {
+      state.ended = null;
+      selectCall(wanted.id);
+    }
+    return;
+  }
+  if (state.selectedId || state.ended) return;
   if (state.calls.length === 1) selectCall(state.calls[0].id);
 }
 
@@ -320,11 +364,6 @@ function callEnded(id, reason) {
   state.dtmf = "";
   state.hangingUp = null;
   state.calls = state.calls.filter((c) => c.id !== id);
-  state.manualCalls.delete(id);
-  if (state.remute?.callId === id) {
-    clearTimeout(state.remute.timer);
-    state.remute = null;
-  }
   state.ended = { callId: id, reason: reason || null };
   render();
   setTimeout(() => {
@@ -450,18 +489,24 @@ function announceCall(call) {
   state.notifiedCalls.add(call.id);
   if (state.notifiedCalls.size > 200) state.notifiedCalls.clear();
   playChime();
-  if (cfg.notify.desktop && window.Notification?.permission === "granted") {
-    try {
-      const who = call.customerNumber || call.customerName || directionLabel(call.direction);
-      const note = new Notification("Vapi: incoming call", { body: `${who} · ${statusLabel(call.status)}`, tag: call.id, renotify: false });
-      note.onclick = () => {
-        window.focus();
-        selectCall(call.id);
-        note.close();
-      };
-    } catch {
-      // Notification constructor can throw on some platforms.
-    }
+  // While the operator is looking at the console, the chime is enough.
+  if (!cfg.notify.desktop || window.Notification?.permission !== "granted" || (document.visibilityState === "visible" && document.hasFocus())) return;
+  const who = call.customerNumber || call.customerName || directionLabel(call.direction);
+  const options = { body: `${who} · ${statusLabel(call.status)}`, tag: call.id, renotify: false, icon: "icons/icon-192.png", data: { url: `./?call=${call.id}`, callId: call.id } };
+  // Same tag as the Web Push alert for this call, so it never shows twice.
+  if (state.swReg) {
+    state.swReg.showNotification("📞 Incoming call", options).catch(() => {});
+    return;
+  }
+  try {
+    const note = new Notification("📞 Incoming call", options);
+    note.onclick = () => {
+      window.focus();
+      selectCall(call.id);
+      note.close();
+    };
+  } catch {
+    // Android Chrome has no Notification constructor (service worker only).
   }
 }
 
@@ -480,6 +525,8 @@ async function askNotifyPermission() {
       // Older browsers use the callback form; ignore.
     }
   }
+  // Same click also turns on alerts for when the console is closed.
+  if (window.Notification?.permission === "granted" && canPush() && !state.pushOn) await turnOnPush({ quiet: true });
   renderNotifyButton();
 }
 
@@ -488,6 +535,127 @@ function renderNotifyButton() {
   el.enableNotify.hidden = state.audioUnlocked && !notifyPending;
   // A call is waiting and it is silent: make the button impossible to miss.
   el.enableNotify.classList.toggle("attention", !state.audioUnlocked && state.calls.length > 0);
+  el.alertsBtn.hidden = !cfg.notify.push || !state.pushKey;
+  el.alertsBtn.textContent = state.pushOn ? "🔔 Alerts on" : "🔕 Alerts off";
+  el.alertsBtn.classList.toggle("attention", !state.pushOn && Boolean(state.pushKey) && !notifyPending);
+  el.installBtn.hidden = !state.installPrompt;
+}
+
+// ------------------------------------------------ alerts (web push) + install --
+
+function canPush() {
+  return Boolean(cfg.notify.push && state.pushKey && state.swReg && pushSupported());
+}
+
+async function turnOnPush({ quiet = false } = {}) {
+  if (!canPush()) return false;
+  try {
+    if (Notification.permission === "default") await Notification.requestPermission();
+    if (Notification.permission !== "granted") {
+      if (!quiet) toast("Notifications are blocked for this site. Allow them in the browser's site settings, then try again.", "error", 9000);
+      return false;
+    }
+    await enablePush(api, state.swReg, state.pushKey);
+    state.pushOn = true;
+    if (!quiet) toast("Call alerts are on for this device.", "ok", 3000);
+    return true;
+  } catch (error) {
+    if (!quiet) toast(`Could not turn on alerts: ${error.message}`, "error", 8000);
+    return false;
+  } finally {
+    renderNotifyButton();
+    renderAlertsDialog();
+  }
+}
+
+// Keeps this device's subscription registered with the Worker on every
+// visit (the server forgets devices whose push service reports them gone).
+async function renewPush() {
+  if (!canPush() || Notification.permission !== "granted") return;
+  const sub = await currentSubscription(state.swReg);
+  if (!sub) return; // never turned on here, or turned off: stay off
+  await turnOnPush({ quiet: true });
+}
+
+async function sendTestAlert() {
+  const sub = await currentSubscription(state.swReg);
+  if (!sub) {
+    toast("Turn on alerts first.", "error");
+    return;
+  }
+  try {
+    const res = await api.pushTest(sub.endpoint);
+    if (res.sent > 0) toast("Test alert sent — it should appear in a few seconds. Close the console to see it arrive without it.", "ok", 7000);
+    else toast("The push service refused the test alert. Turn alerts off and on again.", "error", 8000);
+  } catch (error) {
+    toast(`Test alert failed: ${error.message}`, "error", 8000);
+  }
+}
+
+async function turnOffPush() {
+  await disablePush(api, state.swReg);
+  state.pushOn = false;
+  toast("Call alerts are off for this device.", "ok", 3000);
+  renderNotifyButton();
+  renderAlertsDialog();
+}
+
+function renderAlertsDialog() {
+  if (!el.alertsDialog.open) return;
+  const permission = window.Notification ? Notification.permission : "unsupported";
+  const rows = [
+    ["This device", state.pushOn ? ["Alerts on", "ok"] : ["Alerts off", "bad"]],
+    ["Notifications", permission === "granted" ? ["Allowed", "ok"] : permission === "denied" ? ["Blocked in browser settings", "bad"] : permission === "default" ? ["Not asked yet", ""] : ["Not supported here", "bad"]],
+    ["Opened as", isStandalone() ? ["Installed app", "ok"] : ["Browser tab", ""]],
+  ];
+  el.alertsStatus.replaceChildren(
+    ...rows.flatMap(([label, [value, cls]]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = value;
+      if (cls) dd.className = cls;
+      return [dt, dd];
+    }),
+  );
+  let hint = "Alerts use the device's notification sound. They arrive while the browser is running in the background, even with this console closed.";
+  if (isIos() && !isStandalone()) hint = "iPhone/iPad: tap Share → Add to Home Screen, open Vapi Control from the Home Screen, then turn on alerts there. iOS delivers web alerts only to Home Screen apps.";
+  else if (!pushSupported()) hint = "This browser cannot receive alerts with the console closed. Use Chrome, Edge, Firefox or Safari (iOS 16.4+ from the Home Screen).";
+  else if (permission === "denied") hint = "Notifications were blocked for this site. Allow them in the browser's site settings (lock icon next to the address), then turn alerts on.";
+  el.alertsHint.textContent = hint;
+  el.alertsEnable.hidden = state.pushOn;
+  el.alertsEnable.disabled = !canPush() || permission === "denied";
+  el.alertsTest.hidden = !state.pushOn;
+  el.alertsDisable.hidden = !state.pushOn;
+}
+
+function openAlertsDialog() {
+  unlockAudio();
+  el.alertsDialog.showModal();
+  renderAlertsDialog();
+}
+
+async function installApp() {
+  const prompt = state.installPrompt;
+  if (!prompt) return;
+  state.installPrompt = null;
+  renderNotifyButton();
+  try {
+    await prompt.prompt();
+  } catch {
+    // dismissed
+  }
+}
+
+async function initAlerts(session) {
+  state.pushKey = cfg.notify.push ? session?.push?.publicKey || null : null;
+  state.swReg = await registerServiceWorker();
+  if (state.swReg) {
+    const sub = await currentSubscription(state.swReg);
+    state.pushOn = Boolean(sub && window.Notification?.permission === "granted");
+  }
+  renderNotifyButton();
+  renewPush().catch(() => {});
 }
 
 // ------------------------------------------------------------ event stream --
@@ -509,10 +677,6 @@ const events = new EventsClient({
     if (affected === "*") for (const id of store.calls.keys()) state.hubSeen.add(id);
     else state.hubSeen.add(affected);
 
-    // The assistant finished speaking an operator line: mute it again at once.
-    if (msg.type === "speech" && msg.role === "assistant" && msg.status === "stopped" && state.remute?.callId === msg.callId) {
-      setTimeout(() => remuteNow(msg.callId), 300);
-    }
     const id = state.selectedId;
     if (id && (affected === "*" || affected === id)) {
       const st = store.calls.get(id);
@@ -528,7 +692,6 @@ const events = new EventsClient({
     if (endedId && endedId !== state.selectedId && state.calls.some((c) => c.id === endedId)) {
       state.calls = state.calls.filter((c) => c.id !== endedId);
       state.newIds.delete(endedId);
-      state.manualCalls.delete(endedId);
       autoSelect();
       render();
     }
@@ -538,7 +701,14 @@ const events = new EventsClient({
     if (eventCallId && hubState?.status !== "ended" && !state.calls.some((c) => c.id === eventCallId)) {
       fetchCallById(eventCallId);
     }
-    if (affected === "*" || affected === id) renderTranscript();
+    if (affected === "*" || affected === id) {
+      renderTranscript();
+      // Operator mode may have been switched from another device.
+      if (msg.type === "state" || msg.type === "snapshot") {
+        renderMode();
+        renderControls();
+      }
+    }
   },
 });
 
@@ -622,89 +792,45 @@ function fill(template, values) {
   return out;
 }
 
-// Only text in another script needs the model to translate; Latin-script
-// text (already English) keeps going through verbatim say.
-function needsTranslation(text) {
-  return /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u.test(text);
-}
-
-function speechEstimateMs(text, translated) {
-  const om = cfg.operatorMode;
-  const ms = (text.length / (om.charsPerSecond || 14)) * 1000 + (om.extraMs || 0) + (translated ? om.translatedExtraMs || 0 : 0);
-  return Math.min(30000, Math.max(2500, ms));
-}
-
-// In operator mode the assistant is muted; it is unmuted just for the
-// operator's own line and muted again once that line has been spoken.
-async function unmuteForLine(callId) {
-  if (!cfg.operatorMode.useMute || !state.manualCalls.has(callId)) return;
-  clearTimeout(state.remute?.timer);
-  state.remute = null;
-  await api.control(callId, "unmute-assistant");
-}
-
-function remuteAfterLine(callId, estimateMs) {
-  if (!cfg.operatorMode.useMute || !state.manualCalls.has(callId)) return;
-  clearTimeout(state.remute?.timer);
-  const timer = setTimeout(() => remuteNow(callId), estimateMs);
-  state.remute = { callId, timer };
-}
-
-function remuteNow(callId) {
-  if (state.remute?.callId !== callId) return;
-  clearTimeout(state.remute.timer);
-  state.remute = null;
-  if (!state.manualCalls.has(callId)) return;
-  api.control(callId, "mute-assistant").catch((error) => {
-    // The call ending in the meantime is not an error worth showing.
-    if (!state.calls.some((c) => c.id === callId) || error.code === "call_ended" || /not active/i.test(error.message)) return;
-    toast(`Could not mute the assistant again: ${error.message}`, "error", 7000);
-  });
-}
-
-async function say(text, { hangUp, translate = el.translateSay.checked } = {}) {
+// The caller hears `text`. Russian (non-Latin) text is translated on the
+// server and the English line is spoken verbatim; the server also unmutes
+// the assistant for the line in operator mode and mutes it again afterwards.
+async function say(text, { hangUp = false, translate = el.translateSay.checked, heard = null } = {}) {
   const content = String(text || "").trim();
   if (!content) return false;
-  const manual = state.manualCalls.has(state.selectedId);
-  // While you drive, your line replaces anything the assistant had queued.
-  const interruptAssistant = manual || el.interruptBot.checked;
-  const translateNow = translate && needsTranslation(content);
-
-  // Vapi's say command is verbatim and cannot translate, so a translated line
-  // goes to the model instead. That rules out endCallAfterSpoken, whose timing
-  // only exists for say.
-  if (translateNow && hangUp) {
-    toast("SAY & HANG UP speaks verbatim, so write that line in English — or SAY it translated and then press END CALL.", "error", 9000);
-    return false;
+  let result = null;
+  const ok = await command(hangUp ? "sayHangup" : "say", async (id) => {
+    try {
+      result = await api.say(id, content, {
+        endCallAfterSpoken: hangUp,
+        interruptAssistant: el.interruptBot.checked,
+        translate,
+        language: cfg.say.translate.targetLanguage,
+      });
+    } catch (error) {
+      // Translation service down: let the call's own model translate and
+      // speak it (not possible together with hang-up).
+      if (hangUp || !["translate_failed", "ai_unavailable"].includes(error.code)) throw error;
+      const prompt = fill(cfg.say.translate.template, { text: content, language: cfg.say.translate.targetLanguage });
+      await api.instruction(id, prompt, { line: true });
+      result = { viaModel: true };
+    }
+  });
+  if (!ok) return false;
+  if (result?.viaModel) {
+    toast(`Translation service unavailable — the assistant will say it in ${cfg.say.translate.targetLanguage} itself.`, "info", 6000);
+    state.lastLine = { heard: heard || content, spoken: null };
+  } else {
+    state.lastLine = { heard: result?.translated ? heard || content : heard, spoken: result?.spoken || content };
+    toast(hangUp ? `Saying “${state.lastLine.spoken}”, then hanging up…` : `Saying: “${state.lastLine.spoken}”`, "ok", 3500);
   }
-  if (translateNow) {
-    const prompt = fill(cfg.say.translate.template, { text: content, language: cfg.say.translate.targetLanguage });
-    return command(
-      "say",
-      async (id) => {
-        await unmuteForLine(id);
-        await api.instruction(id, prompt);
-        remuteAfterLine(id, speechEstimateMs(content, true));
-      },
-      `Sent for the assistant to say in ${cfg.say.translate.targetLanguage}.`,
-    );
-  }
-
-  const ok = await command(
-    hangUp ? "sayHangup" : "say",
-    async (id) => {
-      await unmuteForLine(id);
-      await api.say(id, content, { endCallAfterSpoken: hangUp, interruptAssistant });
-      if (!hangUp) remuteAfterLine(id, speechEstimateMs(content, false));
-    },
-    hangUp ? "Speaking, then hanging up…" : "Sent to the call.",
-  );
-  if (ok && hangUp) {
+  renderLastLine();
+  if (hangUp) {
     state.hangingUp = state.selectedId;
     render();
     schedulePoll(1500);
   }
-  return ok;
+  return true;
 }
 
 async function sayFromInput(hangUp) {
@@ -723,12 +849,13 @@ async function sendInstruction() {
 }
 
 // Operator mode. Vapi has no "hand over to a human" switch, so the assistant is
-// told, for this call only, to stop improvising and wait for dictated lines.
-// The message is inserted without triggering a reply, so nothing is spoken.
+// told, for this call only, to stop improvising and wait for dictated lines
+// (inserted without triggering a reply), and is muted. The server keeps the
+// mode, so every device sees it.
 async function toggleOperatorMode() {
   const id = state.selectedId;
   if (!id) return;
-  const goingManual = !state.manualCalls.has(id);
+  const goingManual = !isManual(id);
   const text = goingManual ? cfg.operatorMode.enterText : cfg.operatorMode.leaveText;
   if (!text) {
     toast("Operator mode text is not configured (config.js → operatorMode).", "error");
@@ -736,22 +863,96 @@ async function toggleOperatorMode() {
   }
   const ok = await command(
     "mode",
-    async (callId) => {
-      await api.instruction(callId, text, { triggerResponse: false });
-      if (cfg.operatorMode.useMute) {
-        if (state.remute?.callId === callId) {
-          clearTimeout(state.remute.timer);
-          state.remute = null;
-        }
-        await api.control(callId, goingManual ? "mute-assistant" : "unmute-assistant");
-      }
-    },
+    (callId) => api.mode(callId, { operator: goingManual, text, mute: cfg.operatorMode.useMute !== false }),
     goingManual ? "You are driving the call — the assistant is muted." : "Handed back to the assistant.",
   );
   if (!ok) return;
-  if (goingManual) state.manualCalls.add(id);
-  else state.manualCalls.delete(id);
+  // The hub broadcasts the change too; set it now so the button flips at once.
+  const st = store.calls.get(id);
+  if (st) st.operator = goingManual;
+  else applyHubMessage(store, { type: "state", call: { callId: id, operator: goingManual } });
   render();
+}
+
+// -------------------------------------------------------------- dictation --
+
+function setDictation(phase, status = "", error = false) {
+  state.dictation.phase = phase;
+  state.dictation.status = status;
+  state.dictation.error = error;
+  renderDictation();
+}
+
+async function toggleDictation() {
+  const d = state.dictation;
+  if (d.phase === "recording") return finishDictation();
+  if (d.phase !== "idle") return;
+  unlockAudio();
+  const recorder = new Recorder({ maxMs: (cfg.dictation.maxSeconds || 45) * 1000, onLimit: () => finishDictation() });
+  d.recorder = recorder;
+  setDictation("starting", "Starting microphone…");
+  try {
+    await recorder.start();
+  } catch (error) {
+    d.recorder = null;
+    const denied = error?.name === "NotAllowedError" || error?.name === "SecurityError";
+    setDictation("idle", denied ? "Microphone access is blocked. Allow the microphone for this site (lock icon next to the address) and try again." : `Microphone unavailable: ${error?.message || error}`, true);
+    return;
+  }
+  if (d.recorder !== recorder) return; // cancelled while starting
+  setDictation("recording");
+  clearInterval(d.timer);
+  d.timer = setInterval(renderDictation, 250);
+}
+
+function cancelDictation() {
+  const d = state.dictation;
+  clearInterval(d.timer);
+  d.recorder?.cancel();
+  d.recorder = null;
+  setDictation("idle", "Recording discarded.");
+}
+
+async function finishDictation() {
+  const d = state.dictation;
+  if (d.phase !== "recording" || !d.recorder) return;
+  clearInterval(d.timer);
+  const recorder = d.recorder;
+  const tooShort = recorder.elapsedMs() < 600;
+  d.recorder = null;
+  setDictation("working", "Recognizing…");
+  const blob = await recorder.stop().catch(() => null);
+  if (tooShort || !blob || blob.size < 800) {
+    setDictation("idle", "Too short — tap DICTATE, speak, then tap again to send.", true);
+    return;
+  }
+  let heard = "";
+  try {
+    heard = (await api.transcribe(blob, cfg.dictation.language)).text.trim();
+  } catch (error) {
+    setDictation("idle", `Speech recognition failed: ${error.message}`, true);
+    return;
+  }
+  if (!heard) {
+    setDictation("idle", "Nothing was recognised. Try again, a little closer to the microphone.", true);
+    return;
+  }
+  // Send straight to the caller, or leave it in the box to edit first.
+  if (!state.autoSend || !canControl()) {
+    el.sayText.value = heard;
+    renderControls();
+    setDictation("idle", canControl() ? "Check the text, then press SAY." : "No call to speak to — the text is in the box.");
+    return;
+  }
+  setDictation("working", `Sending: ${heard}`);
+  const ok = await say(heard, { translate: true, heard });
+  if (ok) setDictation("idle", "");
+  else {
+    // Keep what was said so it is not lost.
+    el.sayText.value = heard;
+    renderControls();
+    setDictation("idle", "Not sent — the text is in the box.", true);
+  }
 }
 
 function dtmfSequence(keys) {
@@ -954,6 +1155,7 @@ function renderControls() {
   el.endCallBtn.disabled = !call || !call.controlAvailable || state.busy.has("end") || Boolean(state.fatal);
   el.endCallBtn.classList.toggle("busy", state.busy.has("end"));
   for (const btn of el.quickPhrases.querySelectorAll("button")) btn.disabled = !control || state.busy.has("say") || state.busy.has("sayHangup");
+  renderDictation();
 
   const dtmfTool = Boolean(state.caps?.dtmf?.viaAssistantTool);
   const dtmfEnabled = control && dtmfTool;
@@ -972,8 +1174,7 @@ function renderControls() {
 }
 
 function renderMode() {
-  const id = state.selectedId;
-  const manual = Boolean(id && state.manualCalls.has(id));
+  const manual = isManual(state.selectedId);
   document.body.classList.toggle("manual-mode", manual);
   el.modeBtn.disabled = !canControl() || state.busy.has("mode");
   el.modeBtn.classList.toggle("on", manual);
@@ -981,8 +1182,48 @@ function renderMode() {
   el.modeState.dataset.state = manual ? "reconnecting" : "auto";
   el.modeState.textContent = manual ? "You (operator)" : "Assistant (auto)";
   el.modeNote.textContent = manual
-    ? "The assistant is muted and told to stay silent. Each EXACT SAY line unmutes it just long enough to speak, then mutes it again."
-    : "The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from EXACT SAY.";
+    ? "The assistant is muted and told to stay silent. Each line you SAY or DICTATE unmutes it just long enough to speak, then it is muted again."
+    : "The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from SAY TO CALLER.";
+}
+
+function renderDictation() {
+  const d = state.dictation;
+  const supported = dictationSupported() && state.session?.dictation !== false;
+  const recording = d.phase === "recording";
+  el.micBtn.disabled = !supported || d.phase === "starting" || d.phase === "working" || Boolean(state.fatal);
+  el.micBtn.classList.toggle("recording", recording);
+  el.micBtn.classList.toggle("working", d.phase === "starting" || d.phase === "working");
+  el.micBtn.setAttribute("aria-pressed", String(recording));
+  el.micCancel.hidden = !recording;
+  if (recording) {
+    const s = Math.floor((d.recorder?.elapsedMs() || 0) / 1000);
+    const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    el.micLabel.textContent = `${state.autoSend && canControl() ? "TAP TO SEND" : "TAP TO STOP"} · ${clock}`;
+  } else if (d.phase === "working" || d.phase === "starting") {
+    el.micLabel.textContent = d.phase === "starting" ? "STARTING…" : "WORKING…";
+  } else {
+    el.micLabel.textContent = "DICTATE";
+  }
+  let status = d.status;
+  if (!supported && !status) status = state.session?.dictation === false ? "Dictation is not configured on the server (Workers AI)." : "This browser cannot record audio here.";
+  if (recording && !status) {
+    const spoken = { ru: "Russian", uk: "Ukrainian", en: "English" }[String(cfg.dictation.language).split("-")[0]];
+    status = `● Recording — ${spoken ? `speak ${spoken}, ` : ""}the caller hears ${cfg.say.translate.targetLanguage}.`;
+  }
+  el.micStatus.textContent = status;
+  el.micStatus.classList.toggle("error", Boolean(d.error));
+}
+
+function renderLastLine() {
+  const line = state.lastLine;
+  el.lastLine.hidden = !line;
+  if (!line) return;
+  const parts = [];
+  if (line.heard) parts.push(document.createTextNode(`${line.heard} → `));
+  const spoken = document.createElement("strong");
+  spoken.textContent = line.spoken ? `“${line.spoken}”` : `(the assistant translates it)`;
+  parts.push(spoken);
+  el.lastLine.replaceChildren(...parts);
 }
 
 function renderAudio() {
@@ -1180,6 +1421,41 @@ function bindUi() {
   el.interruptBot.checked = Boolean(cfg.say.interruptAssistantByDefault);
   el.translateSay.checked = Boolean(cfg.say.translate.enabledByDefault);
   el.translateLang.textContent = cfg.say.translate.targetLanguage;
+  el.autoSendDictation.checked = state.autoSend;
+  el.autoSendDictation.addEventListener("change", () => {
+    state.autoSend = el.autoSendDictation.checked;
+    savePref("autoSendDictation", state.autoSend ? "1" : "0");
+    renderDictation();
+  });
+  el.micBtn.addEventListener("click", toggleDictation);
+  el.micCancel.addEventListener("click", cancelDictation);
+  el.alertsBtn.addEventListener("click", openAlertsDialog);
+  el.alertsEnable.addEventListener("click", () => turnOnPush());
+  el.alertsTest.addEventListener("click", sendTestAlert);
+  el.alertsDisable.addEventListener("click", turnOffPush);
+  el.alertsClose.addEventListener("click", () => el.alertsDialog.close());
+  el.installBtn.addEventListener("click", installApp);
+  window.addEventListener("beforeinstallprompt", (event) => {
+    event.preventDefault();
+    state.installPrompt = event;
+    renderNotifyButton();
+  });
+  window.addEventListener("appinstalled", () => {
+    state.installPrompt = null;
+    renderNotifyButton();
+    toast("Installed. Open Vapi Control from the Home Screen / Start menu.", "ok", 6000);
+  });
+  navigator.serviceWorker?.addEventListener("message", (event) => {
+    const msg = event.data || {};
+    const callId = msg.type === "select-call" ? msg.callId : msg.type === "push" && msg.data?.type === "call" ? msg.data.callId : null;
+    if (!callId) return;
+    if (msg.type === "select-call") {
+      state.wantedCallId = callId;
+      autoSelect();
+    }
+    // The alert may beat the event stream: look the call up directly.
+    fetchCallById(callId);
+  });
   el.modeBtn.addEventListener("click", toggleOperatorMode);
   // Any click or key press on the page unlocks sound for the session.
   document.addEventListener("pointerdown", unlockAudio, { capture: true });
@@ -1257,11 +1533,40 @@ function bindUi() {
   });
 }
 
+// Opened from a call alert: ./?call=<id> selects that call once it is known.
+function takeWantedCallFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const id = params.get("call");
+  if (!id) return;
+  if (/^[0-9a-f-]{36}$/i.test(id)) state.wantedCallId = id.toLowerCase();
+  params.delete("call");
+  const rest = params.toString();
+  history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}${window.location.hash}`);
+}
+
+// Installed apps (and sites the browser trusts) may play sound without a
+// click first; then listening and the ring work right after an alert opens
+// the console.
+function tryAutoUnlock() {
+  if (state.audioUnlocked) return;
+  try {
+    const ctx = sharedAudio();
+    ctx.resume().catch(() => {});
+    setTimeout(() => {
+      if (!state.audioUnlocked && ctx.state === "running") unlockAudio();
+    }, 400);
+  } catch {
+    // no Web Audio
+  }
+}
+
 async function init() {
+  takeWantedCallFromUrl();
   bindUi();
   renderQuickPhrases();
   render();
   setInterval(tick, 250);
+  tryAutoUnlock();
   try {
     const session = await api.session();
     state.session = session;
@@ -1273,6 +1578,7 @@ async function init() {
     el.configWarning.title = warnings.join("\n");
     if (!session.vapiConfigured) state.fatal = "The Vapi private API key secret is not configured on the Worker.";
     if (session.eventsAvailable) events.start();
+    initAlerts(session).catch(() => {});
   } catch (error) {
     state.fatal = error instanceof ApiError ? error.message : "Could not reach the control server.";
     // Still start the event stream; the poll loop recovers once fixed.

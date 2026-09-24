@@ -9,6 +9,7 @@ const CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAX_MESSAGES = 300;
 const MAX_TEXT = 2000;
 const MAX_SYSTEM_TEXT = 600;
+const DIRECTIONS = { inboundPhoneCall: "inbound", outboundPhoneCall: "outbound", webCall: "web" };
 
 function text(value, max = MAX_TEXT) {
   if (typeof value !== "string") return "";
@@ -65,9 +66,17 @@ export function sanitizeServerMessage(body, nowMs = Date.now()) {
   const base = { callId: String(callId).toLowerCase(), at };
 
   switch (msg.type) {
-    case "status-update":
+    case "status-update": {
       if (typeof msg.status !== "string") return null;
-      return { ...base, kind: "status", status: msg.status, endedReason: text(msg.endedReason, 120) || null };
+      const event = { ...base, kind: "status", status: msg.status, endedReason: text(msg.endedReason, 120) || null };
+      // Who is calling, for the new-call alert (the panel already shows the
+      // number from the call list).
+      const number = text(msg.call?.customer?.number, 40);
+      if (number) event.customerNumber = number;
+      const direction = DIRECTIONS[msg.call?.type];
+      if (direction) event.direction = direction;
+      return event;
+    }
     case "end-of-call-report":
       return { ...base, kind: "status", status: "ended", endedReason: text(msg.endedReason, 120) || null };
     case "conversation-update":

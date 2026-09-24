@@ -19,16 +19,23 @@ export async function startMockVapi({ apiKey, jwks }) {
     failList: null,
     // Calls Vapi's list endpoint does not show yet (it lags behind new calls).
     hiddenFromList: new Set(),
+    // Workers AI stand-in (AI_TEST_BASE_URL): speech recognition + translation.
+    ai: { transcript: "Скажи, что я подумаю", whisperText: "", translations: {}, failTranslate: false, failStt: false },
+    aiRequests: [],
+    // Web Push service stand-in: POST /push/<device>.
+    pushes: [],
+    pushStatus: {},
   };
   let base = "";
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, base);
-    const body = await new Promise((resolve) => {
-      let data = "";
-      req.on("data", (c) => (data += c));
-      req.on("end", () => resolve(data));
+    const raw = await new Promise((resolve) => {
+      const chunks = [];
+      req.on("data", (c) => chunks.push(c));
+      req.on("end", () => resolve(Buffer.concat(chunks)));
     });
+    const body = raw.toString("utf8");
     const send = (status, obj, type = "application/json") => {
       res.writeHead(status, { "Content-Type": type });
       res.end(typeof obj === "string" ? obj : JSON.stringify(obj));
@@ -43,6 +50,27 @@ export async function startMockVapi({ apiKey, jwks }) {
     }
 
     let m;
+    if ((m = /^\/push\/([^/]+)$/.exec(url.pathname)) && req.method === "POST") {
+      state.pushes.push({ device: m[1], headers: req.headers, body: raw, at: Date.now() });
+      return send(state.pushStatus[m[1]] || 201, "", "text/plain");
+    }
+
+    if ((m = /^\/ai\/run\/(.+)$/.exec(url.pathname)) && req.method === "POST") {
+      const model = decodeURIComponent(m[1]);
+      const input = JSON.parse(body);
+      state.aiRequests.push({ model, input });
+      if (model === "@cf/deepgram/nova-3") {
+        if (state.ai.failStt) return send(500, { errors: ["stt down"] });
+        return send(200, { result: { results: { channels: [{ alternatives: [{ transcript: state.ai.transcript }] }] } } });
+      }
+      if (model === "@cf/openai/whisper-large-v3-turbo") return send(200, { result: { text: state.ai.whisperText } });
+      if (model === "@cf/meta/llama-3.3-70b-instruct-fp8-fast") {
+        if (state.ai.failTranslate) return send(500, { errors: ["model overloaded"] });
+        const text = input.messages?.at(-1)?.content || "";
+        return send(200, { result: { response: state.ai.translations[text] ?? `"EN(${text.length})"` } });
+      }
+      return send(404, { errors: ["no such model"] });
+    }
     if ((m = /^\/control\/([^/]+)$/.exec(url.pathname)) && req.method === "POST") {
       const call = state.calls.get(m[1]);
       let payload = null;
@@ -174,6 +202,8 @@ export async function startMockVapi({ apiKey, jwks }) {
       state.forwarded.length = 0;
       state.listenConnections.length = 0;
       state.failList = null;
+      state.aiRequests.length = 0;
+      state.pushes.length = 0;
     },
     close() {
       for (const set of state.listenSockets.values()) for (const ws of set) ws.terminate();

@@ -224,6 +224,47 @@ input[type="range"] { flex: 1; accent-color: var(--accent); }
 .phrases .btn { font-weight: 600; letter-spacing: 0.01em; text-align: left; }
 .phrases .btn.hangup { grid-column: 1 / -1; background: #4a3710; border-color: #7a5a19; }
 
+/* ---------- dictation ---------- */
+.dictate-row { display: flex; gap: 8px; }
+.btn.mic {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px 12px;
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  background: #123a2a;
+  border-color: #1f6b4a;
+  color: #c9f5de;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.btn.mic .mic-icon { width: 22px; height: 22px; fill: currentColor; flex: none; }
+.btn.mic.recording { background: #6b1419; border-color: var(--red); color: #fff; animation: rec-pulse 1.2s infinite; }
+.btn.mic.working { background: #1b222c; border-color: var(--border); color: var(--muted); cursor: progress; }
+@keyframes rec-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(255, 90, 95, 0.55); }
+  70% { box-shadow: 0 0 0 10px rgba(255, 90, 95, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 90, 95, 0); }
+}
+.btn.mic-cancel { flex: none; padding: 0 16px; font-size: 16px; }
+.dictate-status { min-height: 18px; font-size: 12.5px; color: var(--muted); }
+.dictate-status:empty { display: none; }
+.dictate-status.error { color: #ffb3b5; }
+.dictate-status .heard { color: var(--text); }
+.last-line { margin: 0; font-size: 12.5px; color: var(--muted); border-left: 2px solid var(--green); padding: 2px 0 2px 8px; }
+.last-line strong { color: var(--text); font-weight: 600; }
+
+/* ---------- alerts dialog ---------- */
+.status-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 10px 0; font-size: 13px; }
+.status-list dt { color: var(--muted); }
+.status-list dd { margin: 0; }
+.status-list .ok { color: var(--green); }
+.status-list .bad { color: #ffb3b5; }
+
 /* ---------- toasts & dialog ---------- */
 .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 20; max-width: min(420px, calc(100vw - 32px)); }
 .toast { padding: 10px 14px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4); font-size: 13px; }
@@ -235,14 +276,33 @@ input[type="range"] { flex: 1; accent-color: var(--accent); }
 .dialog-meta { color: var(--muted); font-size: 13px; word-break: break-all; }
 
 /* ---------- phone ---------- */
+/* One column. The controls panel dissolves (display: contents) so its groups
+   can be reordered around the transcript: dictation and quick phrases first,
+   then the transcript, then everything else. */
 @media (max-width: 860px) {
   .topbar { grid-template-columns: 1fr auto; gap: 6px 12px; padding: 8px 12px; }
   .brand { display: none; }
-  .meta { grid-column: 1 / -1; justify-self: start; }
+  .meta { grid-column: 1 / -1; justify-self: start; flex-wrap: wrap; row-gap: 6px; }
   .timer { font-size: 22px; }
-  .layout { grid-template-columns: 1fr; padding: 10px 12px 16px; }
-  .transcript-panel { height: 42vh; min-height: 240px; }
-  .controls-panel { height: auto; overflow: visible; }
+  .layout { display: flex; flex-direction: column; padding: 10px 12px 16px; }
+  .controls-panel { display: contents; }
+  .controls-panel > * { order: 10; }
+  .controls-panel > .group, .controls-panel > .target {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  body.manual-mode .controls-panel > .group { box-shadow: inset 0 0 0 1px rgba(243, 178, 60, 0.35); }
+  #sayGroup { order: 1; }
+  #phrasesGroup { order: 2; }
+  .transcript-panel { order: 3; height: 40vh; min-height: 220px; }
+  .target { order: 4; }
+  #modeGroup { order: 5; }
+  .btn.mic { padding: 20px 12px; font-size: 17px; }
+  .btn.mic .mic-icon { width: 26px; height: 26px; }
+  .phrases .btn { padding: 12px 10px; }
+  .desktop-only { display: none; }
   .call-list { margin: 8px 12px 0; }
   .call-row { grid-template-columns: 1fr auto; }
   .call-row .dir, .call-row .select { display: none; }

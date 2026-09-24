@@ -6,8 +6,16 @@
   <meta name="robots" content="noindex, nofollow">
   <meta name="referrer" content="no-referrer">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#12161c">
   <title>Vapi Live Control</title>
-  <link rel="icon" href="data:,">
+  <!-- use-credentials: the manifest is behind Cloudflare Access like everything else. -->
+  <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-title" content="Vapi Control">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <link rel="stylesheet" href="css/app.css">
   <script src="config.js"></script>
   <script type="module" src="js/app.js"></script>
@@ -22,7 +30,9 @@
     <div class="timer" id="timer" aria-label="Call duration">--:--</div>
     <div class="meta">
       <span class="pill" id="eventsPill" data-state="offline" title="Live transcript/event stream">Events: offline</span>
-      <button type="button" class="pill bell" id="enableNotify" hidden title="Browsers only allow sound after one click on the page. Also allows desktop notifications.">🔊 Enable sound &amp; alerts</button>
+      <button type="button" class="pill bell" id="enableNotify" hidden title="Browsers only allow sound after one click on the page. Also turns on call alerts.">🔊 Enable sound &amp; alerts</button>
+      <button type="button" class="pill bell" id="alertsBtn" hidden title="Call alerts on this device, even with the console closed">🔔 Alerts</button>
+      <button type="button" class="pill bell" id="installBtn" hidden title="Install the console as an app">⬇ Install app</button>
       <span class="pill warn" id="configWarning" hidden></span>
       <span class="user" id="userEmail"></span>
     </div>
@@ -45,6 +55,8 @@
       <button type="button" class="jump" id="jumpLatest" hidden>↓ New messages</button>
     </section>
 
+    <!-- On a phone this panel dissolves into the page (display: contents) and
+         SAY TO CALLER + QUICK PHRASES move above the transcript. -->
     <section class="panel controls-panel" aria-label="Live controls">
       <div class="target" id="target">
         <div class="target-label">CONTROLLING</div>
@@ -60,10 +72,36 @@
         <div class="row">
           <button type="button" class="btn" id="modeBtn" disabled>TAKE OVER</button>
         </div>
-        <p class="note" id="modeNote">The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from EXACT SAY.</p>
+        <p class="note" id="modeNote">The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from SAY TO CALLER.</p>
       </div>
 
-      <div class="group">
+      <div class="group" id="sayGroup">
+        <div class="group-head"><span>SAY TO CALLER</span><span class="muted desktop-only">Ctrl+Enter = SAY</span></div>
+        <div class="dictate-row">
+          <button type="button" class="btn mic" id="micBtn" disabled aria-pressed="false" title="Speak Russian — the caller hears it in English">
+            <svg class="mic-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/></svg>
+            <span id="micLabel">DICTATE</span>
+          </button>
+          <button type="button" class="btn mic-cancel" id="micCancel" hidden title="Discard this recording">✕</button>
+        </div>
+        <div class="dictate-status" id="micStatus" aria-live="polite"></div>
+        <textarea id="sayText" rows="2" maxlength="1000" placeholder="Type in Russian or English — the caller hears English"></textarea>
+        <label class="check"><input type="checkbox" id="translateSay"> Translate Russian → <span id="translateLang">English</span></label>
+        <label class="check"><input type="checkbox" id="autoSendDictation"> Send dictation right away</label>
+        <label class="check"><input type="checkbox" id="interruptBot"> Interrupt bot speech</label>
+        <div class="row">
+          <button type="button" class="btn primary" id="sayBtn" disabled>SAY</button>
+          <button type="button" class="btn warn" id="sayHangupBtn" disabled>SAY &amp; HANG UP</button>
+        </div>
+        <p class="last-line" id="lastLine" hidden></p>
+      </div>
+
+      <div class="group" id="phrasesGroup">
+        <div class="group-head"><span>QUICK PHRASES</span><button type="button" class="link" id="editPhrases">Edit</button></div>
+        <div class="phrases" id="quickPhrases"></div>
+      </div>
+
+      <div class="group" id="audioGroup">
         <div class="group-head">
           <span>AUDIO</span>
           <span class="state-chip" id="audioState" data-state="disconnected">● Disconnected</span>
@@ -88,19 +126,8 @@
         </div>
       </div>
 
-      <div class="group">
-        <div class="group-head"><span>EXACT SAY</span><span class="muted">Ctrl+Enter = SAY</span></div>
-        <textarea id="sayText" rows="2" maxlength="1000" placeholder="Spoken verbatim in the assistant's voice"></textarea>
-        <label class="check"><input type="checkbox" id="interruptBot"> Interrupt bot speech</label>
-        <label class="check"><input type="checkbox" id="translateSay"> Translate to <span id="translateLang">English</span> <span class="muted">(model speaks it, not verbatim)</span></label>
-        <div class="row">
-          <button type="button" class="btn primary" id="sayBtn" disabled>SAY</button>
-          <button type="button" class="btn warn" id="sayHangupBtn" disabled>SAY &amp; HANG UP</button>
-        </div>
-      </div>
-
-      <div class="group">
-        <div class="group-head"><span>AI INSTRUCTION</span><span class="muted">Ctrl+Enter = SEND</span></div>
+      <div class="group" id="instructionGroup">
+        <div class="group-head"><span>AI INSTRUCTION</span><span class="muted desktop-only">Ctrl+Enter = SEND</span></div>
         <textarea id="instructionText" rows="2" maxlength="3000" placeholder="e.g. Ask whether $120 is the total price."></textarea>
         <div class="row">
           <button type="button" class="btn" id="instructionBtn" disabled>SEND INSTRUCTION</button>
@@ -123,16 +150,26 @@
         <p class="note" id="dtmfNote"></p>
       </div>
 
-      <div class="group">
-        <div class="group-head"><span>QUICK PHRASES</span><button type="button" class="link" id="editPhrases">Edit</button></div>
-        <div class="phrases" id="quickPhrases"></div>
-      </div>
-
       <button type="button" class="btn danger end" id="endCallBtn" disabled>END CALL</button>
     </section>
   </main>
 
   <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+  <dialog id="alertsDialog" class="dialog" aria-labelledby="alertsTitle">
+    <h2 id="alertsTitle">Call alerts on this device</h2>
+    <p class="muted">A notification with the device's alert sound when a call starts — also with the console closed.</p>
+    <dl class="status-list" id="alertsStatus"></dl>
+    <p class="note" id="alertsHint"></p>
+    <div class="row">
+      <button type="button" class="btn primary" id="alertsEnable">Turn on alerts</button>
+      <button type="button" class="btn" id="alertsTest">Send test alert</button>
+      <button type="button" class="btn" id="alertsDisable">Turn off here</button>
+    </div>
+    <div class="row right">
+      <button type="button" class="btn" id="alertsClose">Close</button>
+    </div>
+  </dialog>
 
   <dialog id="phraseDialog" class="dialog wide" aria-labelledby="phraseDialogTitle">
     <h2 id="phraseDialogTitle">Quick phrases</h2>

@@ -8,12 +8,15 @@
 //   /vapi-control/api/session           GET   who am I + server clock
 //   /vapi-control/api/calls             GET   active calls (sanitized)
 //   /vapi-control/api/calls/:id         GET   one call + capabilities
-//   /vapi-control/api/calls/:id/say     POST  exact say (optionally end call after spoken)
+//   /vapi-control/api/calls/:id/say     POST  exact say, optionally translated first (and end call after spoken)
 //   /vapi-control/api/calls/:id/instruction  POST  add-message for this call only
+//   /vapi-control/api/calls/:id/mode    POST  operator mode on/off (assistant muted while the human drives)
 //   /vapi-control/api/calls/:id/dtmf    POST  DTMF via the assistant's dtmf tool (if present)
 //   /vapi-control/api/calls/:id/end     POST  end-call
 //   /vapi-control/api/calls/:id/listen  WS    live audio (proxied listenUrl)
 //   /vapi-control/api/events            WS    live transcript/status events (CallHub)
+//   /vapi-control/api/transcribe        POST  operator dictation (audio) -> text
+//   /vapi-control/api/push/...          POST  Web Push alerts: subscribe / unsubscribe / test
 //
 // Every request, including static files, requires a valid Cloudflare Access
 // identity (see auth.js). State-changing requests and WebSocket upgrades also
@@ -28,9 +31,12 @@ import {
   isWebSocketUpgrade,
   json,
   preflightResponse,
+  readBytesBody,
   readJsonBody,
   withSecurityHeaders,
 } from "./http.js";
+import { aiAvailable, needsTranslation, transcribe, translateLine } from "./ai.js";
+import { pushConfigured, validateSubscription } from "./push.js";
 import {
   CONTROLLABLE_STATUS,
   LOOKBACK_MS,
@@ -51,6 +57,8 @@ export { CallHub } from "./hub.js";
 const PREFIX = "/vapi-control";
 const MAX_SAY_CHARS = 1000;
 const MAX_INSTRUCTION_CHARS = 4000;
+const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
+const AUDIO_TYPES = new Set(["audio/webm", "audio/ogg", "audio/mp4", "audio/mpeg", "audio/wav", "audio/x-wav", "audio/aac", "audio/x-m4a"]);
 
 // Best-effort, per-isolate memory used only to avoid repeating log lines.
 const seenActiveCalls = new Set();
@@ -111,7 +119,7 @@ async function explainControlFailure(client, env, callId, error) {
   return error;
 }
 
-async function sendControl(client, env, call, payload, event, fields) {
+async function runControl(client, env, call, payload, event, fields) {
   log(event, { callId: call.id, ...fields });
   try {
     await client.control(call, payload);
@@ -120,7 +128,51 @@ async function sendControl(client, env, call, payload, event, fields) {
     log("control_command_failed", { callId: call.id, type: payload.type, code: explained.code, vapiStatus: explained.details?.vapiStatus });
     throw explained;
   }
+}
+
+async function sendControl(client, env, call, payload, event, fields) {
+  await runControl(client, env, call, payload, event, fields);
   return json({ ok: true, callId: call.id });
+}
+
+async function hubCall(env, path, body) {
+  const hub = env.HUB.get(env.HUB.idFromName("hub"));
+  const init = body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const res = await hub.fetch(`https://hub.internal${path}`, init);
+  return res.json();
+}
+
+// How long an operator line may take to be heard: the hub re-mutes the
+// assistant after this at the latest (normally sooner, when Vapi reports
+// that the assistant stopped speaking).
+function lineEstimateMs(chars, { translated = false, viaModel = false } = {}) {
+  const ms = (chars / 13) * 1000 + 3000 + (translated ? 1500 : 0) + (viaModel ? 6000 : 0);
+  return Math.round(Math.min(30000, Math.max(4000, ms)));
+}
+
+// Operator mode keeps the assistant muted; the hub (shared by every browser
+// and device) says whether this call is in it. Returns whether the assistant
+// must be unmuted for this line.
+async function beginOperatorLine(env, callId, estimateMs) {
+  if (!env.HUB) return false;
+  try {
+    return (await hubCall(env, "/__hub/line", { callId, estimateMs }))?.mute === true;
+  } catch (error) {
+    log("operator_line_check_failed", { callId, reason: error?.name || "error" });
+    return false;
+  }
+}
+
+// Unmutes the assistant for one operator line and sends it. If sending fails,
+// the assistant is muted again straight away.
+async function speakOperatorLine(client, env, call, unmute, payload, event, fields) {
+  if (unmute) await runControl(client, env, call, { type: "control", control: "unmute-assistant" }, "assistant_unmuted_for_line", {});
+  try {
+    await runControl(client, env, call, payload, event, { ...fields, operator: unmute });
+  } catch (error) {
+    if (unmute) client.control(call, { type: "control", control: "mute-assistant" }).catch(() => {});
+    throw error;
+  }
 }
 
 async function handleApi(request, env, identity, subpath) {
@@ -134,8 +186,54 @@ async function handleApi(request, env, identity, subpath) {
       assistantFilter: Boolean(String(env.VAPI_ASSISTANT_ID || "").trim()),
       vapiConfigured: Boolean(env.VAPI_API_KEY),
       eventsAvailable: Boolean(env.HUB),
+      dictation: aiAvailable(env),
+      translation: aiAvailable(env),
+      push: { publicKey: pushConfigured(env) && env.HUB ? String(env.VAPID_PUBLIC_KEY).trim() : null },
       warnings: configWarnings(env),
     });
+  }
+
+  // Operator dictation: the operator's own recorded voice, never call audio.
+  if (subpath === "/transcribe" && method === "POST") {
+    assertOrigin(request, env);
+    const type = (request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
+    if (!AUDIO_TYPES.has(type)) throw new HttpError(415, "unsupported_media_type", "Expected an audio recording.");
+    const bytes = await readBytesBody(request, MAX_AUDIO_BYTES, "Recording");
+    if (bytes.length < 800) throw new HttpError(400, "audio_too_short", "The recording is empty.");
+    const started = Date.now();
+    const { text, model } = await transcribe(env, bytes, type, new URL(request.url).searchParams.get("lang"));
+    // The dictated words themselves are never logged.
+    log("dictation_transcribed", { bytes: bytes.length, chars: text.length, model, ms: Date.now() - started, by: identity.email });
+    return json({ ok: true, text });
+  }
+
+  if (subpath.startsWith("/push/")) {
+    if (method !== "POST") throw new HttpError(405, "method_not_allowed", "Method not allowed.");
+    assertOrigin(request, env);
+    if (!env.HUB) throw new HttpError(503, "events_unavailable", "Storage is not configured.");
+    const body = await readJsonBody(request);
+    if (subpath === "/push/subscribe") {
+      if (!pushConfigured(env)) throw new HttpError(503, "push_not_configured", "Push alerts are not configured on the Worker (VAPID keys).");
+      const subscription = validateSubscription(body.subscription, env);
+      const label = typeof body.label === "string" ? body.label.trim().slice(0, 80) : "";
+      const res = await hubCall(env, "/__hub/push/put", { subscription, label, by: identity.email });
+      log("push_subscribed", { host: new URL(subscription.endpoint).hostname, label, devices: res.count, by: identity.email });
+      return json({ ok: true, devices: res.count });
+    }
+    if (subpath === "/push/unsubscribe") {
+      const endpoint = typeof body.endpoint === "string" ? body.endpoint : "";
+      if (!endpoint) throw new HttpError(400, "invalid_subscription", "endpoint is required.");
+      await hubCall(env, "/__hub/push/delete", { endpoint });
+      log("push_unsubscribed", { by: identity.email });
+      return json({ ok: true });
+    }
+    if (subpath === "/push/test") {
+      if (!pushConfigured(env)) throw new HttpError(503, "push_not_configured", "Push alerts are not configured on the Worker (VAPID keys).");
+      const endpoint = typeof body.endpoint === "string" && body.endpoint ? body.endpoint : undefined;
+      const res = await hubCall(env, "/__hub/push/test", { endpoint });
+      return json({ ok: true, sent: res.sent, failed: res.failed, removed: res.removed });
+    }
+    throw new HttpError(404, "not_found", "Unknown API endpoint.");
   }
 
   if (subpath === "/events" && method === "GET") {
@@ -184,7 +282,7 @@ async function handleApi(request, env, identity, subpath) {
     return json({ ok: true, now: Date.now(), calls: active });
   }
 
-  const match = /^\/calls\/([^/]+)(?:\/(say|instruction|control|dtmf|end|listen))?$/.exec(subpath);
+  const match = /^\/calls\/([^/]+)(?:\/(say|instruction|mode|control|dtmf|end|listen))?$/.exec(subpath);
   if (!match) throw new HttpError(404, "not_found", "Unknown API endpoint.");
   const callId = assertCallId(match[1]);
   const action = match[2] || null;
@@ -244,17 +342,28 @@ async function handleApi(request, env, identity, subpath) {
   if (action === "say") {
     const text = requireText(body.text, MAX_SAY_CHARS, "Say text");
     const endCallAfterSpoken = body.endCallAfterSpoken === true;
-    const call = await loadCall(client, env, callId, { require: "controllable" });
-    const payload = { type: "say", content: text, endCallAfterSpoken };
-    if (body.interruptAssistant === true) payload.interruptAssistantEnabled = true;
+    // Russian (non-Latin) text is translated here first, then spoken
+    // verbatim: the caller hears exactly the line shown to the operator, and
+    // nothing depends on the call's model agreeing to repeat it.
+    const translate = body.translate === true && needsTranslation(text);
+    const [call, spoken, unmute] = await Promise.all([
+      loadCall(client, env, callId, { require: "controllable" }),
+      translate ? translateLine(env, text, body.language) : text,
+      beginOperatorLine(env, callId, lineEstimateMs(text.length, { translated: translate })),
+    ]);
+    const payload = { type: "say", content: spoken, endCallAfterSpoken };
+    // In operator mode the line replaces anything the assistant had queued.
+    if (body.interruptAssistant === true || unmute) payload.interruptAssistantEnabled = true;
     // A goodbye must not be cut short by the other party talking over it,
     // otherwise the call might never reach the "after spoken" hang-up.
     if (endCallAfterSpoken) payload.interruptionsEnabled = false;
-    return sendControl(client, env, call, payload, endCallAfterSpoken ? "say_and_hangup_requested" : "say_requested", {
-      chars: text.length,
+    await speakOperatorLine(client, env, call, unmute, payload, endCallAfterSpoken ? "say_and_hangup_requested" : "say_requested", {
+      chars: spoken.length,
+      translated: translate,
       interruptAssistant: payload.interruptAssistantEnabled === true,
       by: identity.email,
     });
+    return json({ ok: true, callId: call.id, spoken, translated: translate });
   }
 
   if (action === "instruction") {
@@ -263,13 +372,40 @@ async function handleApi(request, env, identity, subpath) {
     // assistant into or out of operator-controlled mode without making it
     // speak. Anything else should make the model answer straight away.
     const triggerResponseEnabled = body.triggerResponse !== false;
-    const call = await loadCall(client, env, callId, { require: "controllable" });
+    // line: the model is to speak an operator line (translation fallback), so
+    // in operator mode the assistant is unmuted for it like for SAY.
+    const line = body.line === true && triggerResponseEnabled;
+    const [call, unmute] = await Promise.all([
+      loadCall(client, env, callId, { require: "controllable" }),
+      line ? beginOperatorLine(env, callId, lineEstimateMs(Math.min(text.length, 200), { viaModel: true })) : false,
+    ]);
     const payload = { type: "add-message", message: { role: "system", content: text }, triggerResponseEnabled };
-    return sendControl(client, env, call, payload, "ai_instruction_requested", {
+    await speakOperatorLine(client, env, call, unmute, payload, "ai_instruction_requested", {
       chars: text.length,
       trigger: triggerResponseEnabled,
       by: identity.email,
     });
+    return json({ ok: true, callId: call.id });
+  }
+
+  if (action === "mode") {
+    // Operator mode. Vapi has no "hand over to a human" switch, so the model
+    // gets a silent system note for this call and (by default) is muted; the
+    // hub remembers the mode so every browser and device sees it.
+    if (!env.HUB) throw new HttpError(503, "events_unavailable", "Operator mode needs the live event hub.");
+    const operator = body.operator === true;
+    const mute = body.mute !== false;
+    const note = typeof body.text === "string" ? body.text.trim() : "";
+    if (note.length > MAX_INSTRUCTION_CHARS) throw new HttpError(400, "text_too_long", "Operator mode text is too long.");
+    const call = await loadCall(client, env, callId, { require: "controllable" });
+    if (note) {
+      const silent = { type: "add-message", message: { role: "system", content: note }, triggerResponseEnabled: false };
+      await runControl(client, env, call, silent, "ai_instruction_requested", { chars: note.length, trigger: false, by: identity.email });
+    }
+    if (mute) await runControl(client, env, call, { type: "control", control: operator ? "mute-assistant" : "unmute-assistant" }, "assistant_control_requested", { control: operator ? "mute-assistant" : "unmute-assistant", by: identity.email });
+    await hubCall(env, "/__hub/mode", { callId, operator, mute });
+    log("operator_mode_changed", { callId, operator, mute, by: identity.email });
+    return json({ ok: true, callId, operator });
   }
 
   if (action === "control") {

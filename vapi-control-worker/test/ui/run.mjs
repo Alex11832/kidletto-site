@@ -13,6 +13,7 @@ import WebSocket from "ws";
 import { createTestIdp } from "../helpers/jwt.mjs";
 import { startWorkers, stopWorker, WORKER_DIR } from "../helpers/devserver.mjs";
 import { startMockVapi } from "../integration/mock-vapi.mjs";
+import { vapidKeys } from "../helpers/webpush.mjs";
 
 const FAKE_VAPI_KEY = "ui-test-vapi-private-key-NEVER-LEAK";
 const FAKE_WEBHOOK_SECRET = "ui-test-webhook-secret-NEVER-LEAK";
@@ -26,6 +27,7 @@ const C4 = "cccccccc-0000-4000-8000-000000000004";
 const MAIN_PORT = 8799;
 const HOOK_PORT = MAIN_PORT; // both Workers share one local process
 const CDP_PORT = 9555;
+const VAPID = vapidKeys();
 
 const CHROME_CANDIDATES = [
   process.env.CHROME_PATH,
@@ -85,8 +87,8 @@ try {
     port: MAIN_PORT,
     inspectorPort: 9343,
     stateDir: persistRoot,
-    secrets: { VAPI_API_KEY: FAKE_VAPI_KEY, VAPI_WEBHOOK_SECRET: FAKE_WEBHOOK_SECRET },
-    mainVars: { VAPI_API_BASE_URL: mock.base, TEAM_DOMAIN: mock.base, POLICY_AUD: AUD, ALLOWED_EMAILS: OPERATOR },
+    secrets: { VAPI_API_KEY: FAKE_VAPI_KEY, VAPI_WEBHOOK_SECRET: FAKE_WEBHOOK_SECRET, VAPID_PRIVATE_KEY: VAPID.privateKey },
+    mainVars: { VAPI_API_BASE_URL: mock.base, AI_TEST_BASE_URL: mock.base, VAPID_PUBLIC_KEY: VAPID.publicKey, TEAM_DOMAIN: mock.base, POLICY_AUD: AUD, ALLOWED_EMAILS: OPERATOR },
     // No WEBHOOK_FORWARD_URL here: covers the "transcript only" setup.
     webhookVars: {},
   });
@@ -100,6 +102,9 @@ try {
     "--no-first-run",
     "--no-default-browser-check",
     "--autoplay-policy=no-user-gesture-required",
+    // A fake microphone (a beep) that needs no permission prompt: dictation.
+    "--use-fake-ui-for-media-stream",
+    "--use-fake-device-for-media-stream",
     "--window-size=1400,900",
     "about:blank",
   ]);
@@ -200,10 +205,13 @@ await send("Runtime.enable");
 await send("Network.enable");
 // Stand-in for the header Cloudflare Access adds to every proxied request.
 await send("Network.setExtraHTTPHeaders", { headers: { "Cf-Access-Jwt-Assertion": TOKEN } });
+// …and the Access session cookie, for requests the browser makes on its own
+// (the service worker script); the test router turns it into the header.
+await send("Network.setCookie", { name: "CF_Authorization", value: TOKEN, domain: "127.0.0.1", path: "/", httpOnly: true });
 // Record any microphone request attempt.
 await send("Page.addScriptToEvaluateOnNewDocument", {
   source:
-    "window.__micRequests = 0; if (navigator.mediaDevices) { const g = navigator.mediaDevices.getUserMedia?.bind(navigator.mediaDevices); navigator.mediaDevices.getUserMedia = (...a) => { window.__micRequests++; return g ? g(...a) : Promise.reject(new Error('blocked')); }; }",
+    "window.__micRequests = 0; if (navigator.mediaDevices) { const g = navigator.mediaDevices.getUserMedia?.bind(navigator.mediaDevices); navigator.mediaDevices.getUserMedia = async (...a) => { window.__micRequests++; if (!g) throw new Error('blocked'); const s = await g(...a); window.__lastMicStream = s; return s; }; }",
 });
 await send("Page.enable");
 
@@ -315,19 +323,28 @@ await check("operator mode mutes the assistant and unmutes it only for the opera
   assert.deepEqual(types(), ["add-message:silent", "mute-assistant"]);
   assert.match(mock.state.controls[0].payload.message.content, /Operator control ON/);
 
-  // Russian line: unmute, the model translates and speaks it, then re-mute.
+  // Russian line: translated on the server, spoken verbatim in English with
+  // the assistant unmuted just for it; the server mutes it again once Vapi
+  // reports the line spoken.
   mock.state.controls.length = 0;
+  mock.state.ai.translations["Скажи, что я подумаю"] = "I'll think about it.";
   await typeInto("sayText", "Скажи, что я подумаю");
   await until(`!document.getElementById('sayBtn').disabled`);
   await click("sayBtn");
   await waitControl(2);
-  assert.deepEqual(types(), ["unmute-assistant", "add-message"]);
-  const tr = mock.state.controls[1].payload.message.content;
-  assert.ok(tr.includes("Скажи, что я подумаю") && tr.includes("English"));
-  // The assistant's speech-update "stopped" re-mutes straight away.
+  assert.deepEqual(types(), ["unmute-assistant", "say"]);
+  assert.deepEqual(mock.state.controls[1].payload, { type: "say", content: "I'll think about it.", endCallAfterSpoken: false, interruptAssistantEnabled: true });
+  await until(`document.getElementById('lastLine').textContent.includes("I'll think about it.")`);
+  assert.match(await text("lastLine"), /Скажи, что я подумаю → “I'll think about it.”/);
+  await webhook({ type: "speech-update", role: "assistant", status: "started", call: { id: C1 }, timestamp: Date.now() });
   await webhook({ type: "speech-update", role: "assistant", status: "stopped", call: { id: C1 }, timestamp: Date.now() });
   await waitControl(3);
   assert.equal(types()[2], "mute-assistant");
+
+  // Another browser/device (or a reload) sees the same operator mode.
+  await send("Page.reload");
+  await until(`document.body.classList.contains('manual-mode') && document.getElementById('modeBtn').textContent === 'HAND BACK TO ASSISTANT' && !document.getElementById('modeBtn').disabled`, { timeout: 10000, what: "operator mode survives a reload" });
+  await js("document.body.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }))");
 
   // English line: spoken verbatim with say (no translation), replacing queued speech.
   mock.state.controls.length = 0;
@@ -337,8 +354,8 @@ await check("operator mode mutes the assistant and unmutes it only for the opera
   await waitControl(2);
   assert.deepEqual(types(), ["unmute-assistant", "say"]);
   assert.deepEqual(mock.state.controls[1].payload, { type: "say", content: "I'll think about it.", endCallAfterSpoken: false, interruptAssistantEnabled: true });
-  // Without a speech event, the fallback estimate re-mutes (2.5 s minimum).
-  await waitControl(3, 6000);
+  // Without a speech event, the server's estimate re-mutes (4 s minimum).
+  await waitControl(3, 8000);
   assert.equal(types()[2], "mute-assistant");
 
   // Hand back: silent instruction + unmute.
@@ -349,14 +366,18 @@ await check("operator mode mutes the assistant and unmutes it only for the opera
   assert.match(mock.state.controls[0].payload.message.content, /Operator control OFF/);
 });
 
-await check("SAY & HANG UP refuses a Russian line (it speaks verbatim) and sends nothing", async () => {
+await check("translation service down: the Russian line goes to the assistant's model instead of being lost", async () => {
   mock.state.controls.length = 0;
-  await typeInto("sayText", "Пока, я подумаю");
-  await until(`!document.getElementById('sayHangupBtn').disabled`);
-  await click("sayHangupBtn");
-  await sleep(500);
-  assert.equal(mock.state.controls.length, 0);
-  await typeInto("sayText", "");
+  mock.state.ai.failTranslate = true;
+  await typeInto("sayText", "Перезвоню через десять минут");
+  await until(`!document.getElementById('sayBtn').disabled`);
+  await click("sayBtn");
+  const c = await waitControl(1);
+  assert.equal(c.payload.type, "add-message");
+  assert.equal(c.payload.triggerResponseEnabled, true);
+  assert.ok(c.payload.message.content.includes("Перезвоню через десять минут") && c.payload.message.content.includes("English"));
+  mock.state.ai.failTranslate = false;
+  await until(`document.getElementById('sayText').value === ''`);
 });
 
 await check("DTMF keypad is disabled and labelled NOT SUPPORTED when the assistant has no dtmf tool", async () => {
@@ -383,6 +404,55 @@ await check("LISTEN starts by itself once the page was clicked, shows what arriv
   while ((mock.state.listenSockets.get(C1)?.size || 0) > 0 && Date.now() < end) await sleep(50);
   assert.equal(mock.state.listenSockets.get(C1)?.size || 0, 0, "upstream listen socket closed");
   assert.equal(await js("window.__micRequests"), 0);
+});
+
+await check("DICTATE: speak Russian, the caller hears English; the microphone is released afterwards", async () => {
+  mock.state.controls.length = 0;
+  mock.state.aiRequests.length = 0;
+  mock.state.ai.transcript = "Скажи, что я подумаю";
+  mock.state.ai.translations["Скажи, что я подумаю"] = "I'll think about it.";
+  assert.equal(await js("document.getElementById('autoSendDictation').checked"), true, "dictation is sent right away by default");
+  await until(`!document.getElementById('micBtn').disabled`);
+  await click("micBtn");
+  await until(`document.getElementById('micBtn').classList.contains('recording')`, { what: "recording started" });
+  assert.match(await text("micLabel"), /TAP TO SEND/);
+  assert.equal(await js("document.getElementById('micCancel').hidden"), false);
+  await sleep(1300);
+  await click("micBtn");
+  const c = await waitControl(1, 8000);
+  assert.deepEqual(c.payload, { type: "say", content: "I'll think about it.", endCallAfterSpoken: false });
+  const stt = mock.state.aiRequests.find((r) => r.model === "@cf/deepgram/nova-3");
+  assert.equal(stt.input.language, "ru");
+  assert.match(stt.input.audio.contentType, /^audio\/(webm|ogg|mp4)$/);
+  assert.ok(Buffer.from(stt.input.audio.body, "base64").length > 1000, "the recorded audio was uploaded");
+  await until(`document.getElementById('lastLine').textContent.includes("I'll think about it.")`);
+  assert.match(await text("lastLine"), /Скажи, что я подумаю → “I'll think about it.”/);
+  assert.equal(await js("window.__lastMicStream.getTracks().every(t => t.readyState === 'ended')"), true, "microphone released after recording");
+  assert.equal(await js("document.getElementById('micBtn').classList.contains('recording')"), false);
+
+  // "Send dictation right away" off: the recognised text waits in the box.
+  mock.state.controls.length = 0;
+  await click("autoSendDictation");
+  mock.state.ai.transcript = "Сколько это будет стоить?";
+  await click("micBtn");
+  await until(`document.getElementById('micBtn').classList.contains('recording')`);
+  assert.match(await text("micLabel"), /TAP TO STOP/);
+  await sleep(1000);
+  await click("micBtn");
+  await until(`document.getElementById('sayText').value === 'Сколько это будет стоить?'`, { timeout: 8000 });
+  await sleep(300);
+  assert.equal(mock.state.controls.length, 0, "nothing is said until SAY");
+
+  // ✕ discards a recording.
+  await click("micBtn");
+  await until(`document.getElementById('micBtn').classList.contains('recording')`);
+  await click("micCancel");
+  await until(`!document.getElementById('micBtn').classList.contains('recording')`);
+  assert.match(await text("micStatus"), /discarded/);
+  await sleep(300);
+  assert.equal(mock.state.controls.length, 0);
+  await click("autoSendDictation");
+  await typeInto("sayText", "");
 });
 
 await check("multiple calls: list shown, selection stays explicit, commands go to the chosen call", async () => {
@@ -446,7 +516,9 @@ await check("SAY & HANG UP: speaks, then the call ends by itself -> NO ACTIVE CA
   const d = await waitControl(1);
   assert.ok(d.payload.message.content.includes('keys "1w2w#"'));
   await until(`document.getElementById('dtmfDisplay').textContent === ''`);
-  await typeInto("sayText", "Okay, I'll think about it. Bye.");
+  // Russian goodbye: translated first, then spoken with the hang-up.
+  mock.state.ai.translations["Ладно, я подумаю. Пока."] = "Okay, I'll think about it. Bye.";
+  await typeInto("sayText", "Ладно, я подумаю. Пока.");
   await until(`!document.getElementById('sayHangupBtn').disabled`);
   await click("sayHangupBtn");
   const c = await waitControl(2);
@@ -466,6 +538,35 @@ await check("Vapi errors are shown without crashing, and the page recovers", asy
   await js(`document.dispatchEvent(new Event('visibilitychange'))`);
   await until(`document.getElementById('banner').hidden`, { timeout: 25000 });
   assert.equal(await text("callStateText"), "NO ACTIVE CALL");
+});
+
+await check("installable app: service worker is active; the alerts panel explains this device's state", async () => {
+  // ready never settles if registration failed: race it so the check can fail.
+  const scope = await until(`Promise.race([navigator.serviceWorker.ready.then((r) => r.active && r.scope), new Promise((r) => setTimeout(() => r(false), 1000))])`, { timeout: 10000, what: "service worker active" });
+  assert.match(scope, /\/vapi-control\/$/);
+  assert.equal(await js("document.querySelector('link[rel=manifest]').crossOrigin"), "use-credentials");
+  await until(`!document.getElementById('alertsBtn').hidden`, { what: "alerts button (push configured on the server)" });
+  await click("alertsBtn");
+  await until(`document.getElementById('alertsDialog').open`);
+  assert.match(await text("alertsStatus"), /This device/);
+  assert.ok((await text("alertsHint")).length > 20);
+  await click("alertsClose");
+  await until(`!document.getElementById('alertsDialog').open`);
+});
+
+await check("an alert click opens the console on that call (?call=…), even with several calls", async () => {
+  const A = "cccccccc-0000-4000-8000-00000000000a";
+  const B = "cccccccc-0000-4000-8000-00000000000b";
+  await startCall({ id: A, assistantId: ASSISTANT, startedAgoMs: 3000 });
+  await startCall({ id: B, assistantId: ASSISTANT, startedAgoMs: 2000, number: "+15550009999" });
+  await send("Page.navigate", { url: `${APP}?call=${B}` });
+  await until(`document.getElementById('targetId').textContent === '${B}'`, { timeout: 10000, what: "call from the alert selected" });
+  assert.equal(await js("location.search"), "", "the call parameter is removed from the address");
+  for (const id of [A, B]) {
+    mock.endCall(id, "test");
+    await webhook({ type: "status-update", status: "ended", endedReason: "test", call: { id }, timestamp: Date.now() });
+  }
+  await until(`document.getElementById('callStateText').textContent === 'NO ACTIVE CALL'`, { timeout: 12000 });
 });
 
 await check("no uncaught JavaScript exceptions; no secrets in the page", async () => {
@@ -502,6 +603,11 @@ await check("phone-width layout has no horizontal scroll", async () => {
   await sleep(400);
   const overflow = await js("document.documentElement.scrollWidth - document.documentElement.clientWidth");
   assert.ok(overflow <= 0, `horizontal overflow ${overflow}px`);
+  // Phone: dictation first, quick phrases next, then the transcript, the rest below.
+  const tops = await js(`Object.fromEntries(['sayGroup', 'phrasesGroup', 'modeGroup', 'audioGroup', 'endCallBtn'].map(id => [id, document.getElementById(id).getBoundingClientRect().top]).concat([['transcript', document.querySelector('.transcript-panel').getBoundingClientRect().top]]))`);
+  assert.ok(tops.sayGroup < tops.phrasesGroup && tops.phrasesGroup < tops.transcript && tops.transcript < tops.modeGroup && tops.modeGroup < tops.audioGroup && tops.audioGroup < tops.endCallBtn, JSON.stringify(tops));
+  const mic = await js("(() => { const r = document.getElementById('micBtn').getBoundingClientRect(); return { h: r.height, w: r.width }; })()");
+  assert.ok(mic.h >= 56 && mic.w >= 300, `big thumb-sized DICTATE button: ${JSON.stringify(mic)}`);
   const shot = await send("Page.captureScreenshot", { format: "png" });
   fs.mkdirSync(path.join(WORKER_DIR, "test-results"), { recursive: true });
   fs.writeFileSync(path.join(WORKER_DIR, "test-results", "ui-phone.png"), Buffer.from(shot.data, "base64"));

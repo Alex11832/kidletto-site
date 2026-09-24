@@ -10,11 +10,13 @@
 const MAX_LIVE = 20;
 
 function blank(callId) {
-  return { callId, status: null, endedReason: null, messages: [], conversationAt: 0, live: [], speech: {}, updatedAt: 0 };
+  return { callId, status: null, endedReason: null, operator: false, messages: [], conversationAt: 0, live: [], speech: {}, updatedAt: 0 };
 }
 
 function normalizeCall(raw) {
   const st = { ...blank(raw.callId), ...raw };
+  // Operator mode lives in the hub, so every browser and device agrees on it.
+  st.operator = raw.operator === true;
   st.messages = Array.isArray(raw.messages) ? raw.messages : [];
   st.live = Array.isArray(raw.live) ? raw.live : [];
   st.speech = raw.speech && typeof raw.speech === "object" ? raw.speech : {};

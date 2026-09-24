@@ -45,6 +45,9 @@ export function parseJsonc(text) {
 function testConfig(file, vars, dir) {
   const config = parseJsonc(fs.readFileSync(path.join(WORKER_DIR, file), "utf8"));
   delete config.$schema;
+  // Workers AI has no local simulation (wrangler would call the real service);
+  // tests use the mock behind AI_TEST_BASE_URL instead.
+  delete config.ai;
   config.main = path.join(WORKER_DIR, config.main);
   if (config.assets?.directory) config.assets.directory = path.resolve(WORKER_DIR, config.assets.directory);
   config.vars = { ...(config.vars || {}), ...vars };
