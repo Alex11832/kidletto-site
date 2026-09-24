@@ -453,13 +453,20 @@ await check("SAY translates Russian on the server and the caller hears the Engli
   mock.state.ai.translations["Как дела"] = "Как дела?";
   r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Как дела", translate: true } });
   assert.equal(r.json.error.code, "translate_failed");
-  // Mumbling / noise: the translator says there is nothing to say (instead of
-  // inventing a line), and nothing is spoken.
-  mock.state.ai.translations["ммм э-э"] = "<<NONE>>";
+  // Only hesitation sounds: refused before the model (which would invent a
+  // line), nothing is spoken.
+  mock.state.aiRequests.length = 0;
   r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "ммм э-э", translate: true } });
   assert.equal(r.status, 422);
   assert.equal(r.json.error.code, "nothing_to_say");
+  assert.equal(mock.state.aiRequests.length, 0);
   assert.equal(mock.state.controls.length, 0);
+  // Any real words are translated, whoever they seem addressed to.
+  mock.state.ai.translations["Анечка, иди пиши и читай."] = "Annechka, go write and read.";
+  r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Анечка, иди пиши и читай.", translate: true } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.spoken, "Annechka, go write and read.");
+  mock.state.controls.length = 0;
 });
 
 await check("operator mode lives on the server: each line unmutes, the hub mutes again when the line is spoken", async () => {

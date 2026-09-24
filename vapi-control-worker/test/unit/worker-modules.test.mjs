@@ -222,3 +222,9 @@ test("log redaction removes keys, bearer tokens, JWTs and monitor URLs", () => {
   assert.ok(out.includes(CALL_ID));
   assert.ok(!scrubString("x eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJlc2lnbmF0dXJl").includes("eyJ"));
 });
+
+test("translation guard: hesitation sounds are refused, any real words go through", async () => {
+  const { hasRealWords } = await import("../../src/ai.js");
+  for (const t of ["ммм э-э", "ээээ", "", "  ...  ", "мм, ну"]) assert.equal(hasRealWords(t), false, t);
+  for (const t of ["Да", "Угу", "Анечка, иди пиши и читай.", "Мама, выключи чайник", "120 долларов"]) assert.equal(hasRealWords(t), true, t);
+});
