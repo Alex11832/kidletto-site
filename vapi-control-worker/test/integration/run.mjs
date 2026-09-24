@@ -453,6 +453,12 @@ await check("SAY translates Russian on the server and the caller hears the Engli
   mock.state.ai.translations["Как дела"] = "Как дела?";
   r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "Как дела", translate: true } });
   assert.equal(r.json.error.code, "translate_failed");
+  // Mumbling / noise: the translator says there is nothing to say (instead of
+  // inventing a line), and nothing is spoken.
+  mock.state.ai.translations["ммм э-э"] = "<<NONE>>";
+  r = await api(`calls/${CALL_1}/say`, { method: "POST", body: { text: "ммм э-э", translate: true } });
+  assert.equal(r.status, 422);
+  assert.equal(r.json.error.code, "nothing_to_say");
   assert.equal(mock.state.controls.length, 0);
 });
 

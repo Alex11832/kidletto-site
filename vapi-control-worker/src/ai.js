@@ -14,6 +14,9 @@ export const TRANSLATE_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const MAX_LINE_CHARS = 1000;
+// The translator's answer when there is nothing sensible to say: the model
+// would otherwise make a line up, and the caller would hear it.
+const NOTHING = "<<NONE>>";
 
 // Text in a non-Latin script (e.g. Russian) needs translating; English and
 // other Latin-script text is spoken as typed.
@@ -93,6 +96,8 @@ function translatePrompt(targetLanguage) {
     `- If the operator phrases it as an instruction about what to say (e.g. "скажи, что я подумаю", "спроси, сколько стоит"), output the line itself ("I'll think about it.", "How much does it cost?").`,
     `- "записаться" / "записываться" means booking or scheduling an appointment.`,
     `- If the text is already in ${targetLanguage}, return it unchanged.`,
+    `- Short replies are real lines: "да" -> "Yes.", "угу" -> "Uh-huh.", "ага" / "окей" -> "Okay."`,
+    `- If the text is empty, unintelligible, only hesitation sounds (like "ммм", "э-э"), or contains nothing to say, output exactly ${NOTHING}. Never invent a line.`,
     `- Output only the line: no quotes, no labels, no notes, no alternatives.`,
   ].join("\n");
 }
@@ -123,6 +128,9 @@ export async function translateLine(env, text, targetLanguage = "English") {
     throw new HttpError(502, "translate_failed", "Translation failed.", { reason: String(error?.message || "").slice(0, 120) });
   }
   const line = cleanLine(typeof out?.response === "string" ? out.response : out?.choices?.[0]?.message?.content);
+  if (/^<*\s*none\s*>*\.?$/i.test(line)) {
+    throw new HttpError(422, "nothing_to_say", "No line to say was recognised in that text. Try again.");
+  }
   // An empty or still-untranslated answer must never be spoken to the caller.
   if (!line || line.length > MAX_LINE_CHARS || (target === "English" && needsTranslation(line))) {
     throw new HttpError(502, "translate_failed", "Translation returned no usable line.");
