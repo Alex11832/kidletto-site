@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark">
+  <title>Vapi Live Control</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/app.css">
+  <script src="config.js"></script>
+  <script type="module" src="js/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">VAPI LIVE CONTROL</div>
+    <div class="call-state" id="callState" data-state="loading">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="callStateText">CONNECTING…</span>
+    </div>
+    <div class="timer" id="timer" aria-label="Call duration">--:--</div>
+    <div class="meta">
+      <span class="pill" id="eventsPill" data-state="offline" title="Live transcript/event stream">Events: offline</span>
+      <button type="button" class="pill bell" id="enableNotify" hidden title="Browsers only allow sound after one click on the page. Also allows desktop notifications.">🔊 Enable sound &amp; alerts</button>
+      <span class="pill warn" id="configWarning" hidden></span>
+      <span class="user" id="userEmail"></span>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" role="status" hidden></div>
+
+  <section class="call-list" id="callList" hidden aria-label="Active calls">
+    <div class="section-title">ACTIVE CALLS <span class="hint" id="callListHint"></span></div>
+    <div class="call-rows" id="callRows"></div>
+  </section>
+
+  <main class="layout">
+    <section class="panel transcript-panel" aria-label="Live transcript">
+      <div class="panel-head">
+        <span>LIVE TRANSCRIPT</span>
+        <span class="speaking" id="speaking"></span>
+      </div>
+      <div class="transcript" id="transcript" aria-live="polite"></div>
+      <button type="button" class="jump" id="jumpLatest" hidden>↓ New messages</button>
+    </section>
+
+    <section class="panel controls-panel" aria-label="Live controls">
+      <div class="target" id="target">
+        <div class="target-label">CONTROLLING</div>
+        <code class="target-id" id="targetId">— no call selected —</code>
+        <div class="target-meta" id="targetMeta"></div>
+      </div>
+
+      <div class="group" id="modeGroup">
+        <div class="group-head">
+          <span>WHO IS TALKING</span>
+          <span class="state-chip" id="modeState" data-state="auto">Assistant (auto)</span>
+        </div>
+        <div class="row">
+          <button type="button" class="btn" id="modeBtn" disabled>TAKE OVER</button>
+        </div>
+        <p class="note" id="modeNote">The assistant answers on its own. Take over and it stays silent — then everything the caller hears comes from EXACT SAY.</p>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <span>AUDIO</span>
+          <span class="state-chip" id="audioState" data-state="disconnected">● Disconnected</span>
+        </div>
+        <div class="row">
+          <button type="button" class="btn" id="listenBtn" disabled>LISTEN</button>
+          <input type="range" id="volume" min="0" max="2" step="0.05" value="1" aria-label="Volume">
+        </div>
+        <div class="row small">
+          <label for="audioFormat">Format</label>
+          <select id="audioFormat">
+            <option value="auto">Auto-detect</option>
+            <option value="pcm16-16000-1">PCM 16 kHz mono</option>
+            <option value="pcm16-16000-2">PCM 16 kHz stereo</option>
+            <option value="pcm16-8000-1">PCM 8 kHz mono</option>
+            <option value="pcm16-8000-2">PCM 8 kHz stereo</option>
+            <option value="pcm16-24000-1">PCM 24 kHz mono</option>
+            <option value="pcm16-48000-1">PCM 48 kHz mono</option>
+            <option value="mulaw-8000-1">μ-law 8 kHz mono</option>
+          </select>
+          <span class="muted" id="audioFormatInfo"></span>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>EXACT SAY</span><span class="muted">Ctrl+Enter = SAY</span></div>
+        <textarea id="sayText" rows="2" maxlength="1000" placeholder="Spoken verbatim in the assistant's voice"></textarea>
+        <label class="check"><input type="checkbox" id="interruptBot"> Interrupt bot speech</label>
+        <label class="check"><input type="checkbox" id="translateSay"> Translate to <span id="translateLang">English</span> <span class="muted">(model speaks it, not verbatim)</span></label>
+        <div class="row">
+          <button type="button" class="btn primary" id="sayBtn" disabled>SAY</button>
+          <button type="button" class="btn warn" id="sayHangupBtn" disabled>SAY &amp; HANG UP</button>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>AI INSTRUCTION</span><span class="muted">Ctrl+Enter = SEND</span></div>
+        <textarea id="instructionText" rows="2" maxlength="3000" placeholder="e.g. Ask whether $120 is the total price."></textarea>
+        <div class="row">
+          <button type="button" class="btn" id="instructionBtn" disabled>SEND INSTRUCTION</button>
+        </div>
+      </div>
+
+      <div class="group" id="dtmfGroup">
+        <div class="group-head"><span>DTMF</span><span class="state-chip" id="dtmfState" data-state="off">unavailable</span></div>
+        <div class="dtmf-display" id="dtmfDisplay" aria-live="polite"></div>
+        <div class="keypad" id="keypad">
+          <button type="button" data-key="1">1</button><button type="button" data-key="2">2</button><button type="button" data-key="3">3</button>
+          <button type="button" data-key="4">4</button><button type="button" data-key="5">5</button><button type="button" data-key="6">6</button>
+          <button type="button" data-key="7">7</button><button type="button" data-key="8">8</button><button type="button" data-key="9">9</button>
+          <button type="button" data-key="*">*</button><button type="button" data-key="0">0</button><button type="button" data-key="#">#</button>
+        </div>
+        <div class="row">
+          <button type="button" class="btn" id="dtmfClear" disabled>CLEAR</button>
+          <button type="button" class="btn" id="dtmfSend" disabled>SEND DTMF</button>
+        </div>
+        <p class="note" id="dtmfNote"></p>
+      </div>
+
+      <div class="group">
+        <div class="group-head"><span>QUICK PHRASES</span><button type="button" class="link" id="editPhrases">Edit</button></div>
+        <div class="phrases" id="quickPhrases"></div>
+      </div>
+
+      <button type="button" class="btn danger end" id="endCallBtn" disabled>END CALL</button>
+    </section>
+  </main>
+
+  <div class="toasts" id="toasts" aria-live="assertive"></div>
+
+  <dialog id="phraseDialog" class="dialog wide" aria-labelledby="phraseDialogTitle">
+    <h2 id="phraseDialogTitle">Quick phrases</h2>
+    <p class="muted">Saved on the server, so every browser you use sees the same list. Write them in English — they are spoken word for word.</p>
+    <div class="phrase-rows" id="phraseRows"></div>
+    <div class="row">
+      <button type="button" class="btn" id="phraseAdd">+ Add phrase</button>
+      <button type="button" class="btn" id="phraseReset">Reset to defaults</button>
+    </div>
+    <div class="row right">
+      <button type="button" class="btn" id="phraseCancel">Cancel</button>
+      <button type="button" class="btn primary" id="phraseSave">Save</button>
+    </div>
+  </dialog>
+
+  <dialog id="endDialog" class="dialog" aria-labelledby="endDialogTitle">
+    <h2 id="endDialogTitle">End this call?</h2>
+    <p class="dialog-meta" id="endDialogMeta"></p>
+    <div class="row right">
+      <button type="button" class="btn" id="endCancel">Cancel</button>
+      <button type="button" class="btn danger" id="endConfirm">End Call</button>
+    </div>
+  </dialog>
+
+  <noscript><p class="banner error">This console requires JavaScript.</p></noscript>
+</body>
+</html>

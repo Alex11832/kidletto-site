@@ -1,0 +1,25 @@
+// Public webhook ingress for Vapi Server URL events (live transcript).
+// Holds no Vapi API key. Deploy AFTER wrangler.jsonc (it binds to the
+// CallHub Durable Object class owned by the "kidletto-vapi-control" Worker).
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kidletto-vapi-control-webhook",
+  "main": "src/webhook.js",
+  "compatibility_date": "2026-09-01",
+  // Lets fetch() reach another Worker's workers.dev URL (e.g. vapi-telegram)
+  // when forwarding events with WEBHOOK_FORWARD_URL.
+  "compatibility_flags": ["global_fetch_strictly_public"],
+
+  // https://kidletto-vapi-control-webhook.<account-subdomain>.workers.dev/vapi/events
+  "workers_dev": true,
+  "preview_urls": false,
+  "keep_vars": true,
+
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "CallHub", "script_name": "kidletto-vapi-control" }]
+  },
+
+  // Structured logs from the code only. Automatic invocation logs are off:
+  // they would store request headers (Access JWT / webhook credential).
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
+}

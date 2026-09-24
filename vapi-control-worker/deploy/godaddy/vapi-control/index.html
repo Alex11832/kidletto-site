@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vapi Live Control</title>
+  <!--
+    Entry point only. The console itself is served by the Cloudflare Worker
+    "kidletto-vapi-control" behind Cloudflare Access; nothing private is here.
+    Remove this folder once kidletto.com is served through Cloudflare and the
+    Worker route kidletto.com/vapi-control* is active.
+  -->
+  <meta http-equiv="refresh" content="0; url=https://kidletto-vapi-control.geofakt.workers.dev/vapi-control/">
+  <style>body{background:#0b0e12;color:#d9dfe7;font:15px system-ui,sans-serif;padding:40px}a{color:#4da3ff}</style>
+</head>
+<body>
+  <p>Opening the Vapi Live Control console…</p>
+  <p><a href="https://kidletto-vapi-control.geofakt.workers.dev/vapi-control/">Continue</a></p>
+  <script>window.location.replace("https://kidletto-vapi-control.geofakt.workers.dev/vapi-control/");</script>
+</body>
+</html>

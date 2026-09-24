@@ -1,0 +1,25 @@
+# Local development only. Copy to .dev.vars (git-ignored) and fill in.
+# Production values are set in Cloudflare (see README.md), never in files.
+
+# --- kidletto-vapi-control (wrangler.jsonc) ---
+# Secret: Vapi private API key (Vapi Dashboard -> API Keys -> Private key)
+VAPI_API_KEY=
+# Optional: only show/control calls of this assistant (UUID)
+VAPI_ASSISTANT_ID=
+# Optional secret: Vapi PUBLIC key, only if monitorPlan listen/control authentication is enabled
+VAPI_PUBLIC_KEY=
+# Cloudflare Access (Zero Trust) — https://<team-name>.cloudflareaccess.com
+TEAM_DOMAIN=
+# Cloudflare Access application AUD tag (64 hex characters)
+POLICY_AUD=
+# Comma-separated emails allowed to use the console
+ALLOWED_EMAILS=
+# Local only: set to true to skip Access for http://localhost / http://127.0.0.1
+# requests (ignored on any other hostname)
+DEV_AUTH_BYPASS=
+
+# --- kidletto-vapi-control-webhook (wrangler.webhook.jsonc) ---
+# Secret: token of the Vapi "Bearer Token" custom credential (Authorization: Bearer ...)
+VAPI_WEBHOOK_SECRET=
+# Optional secret: previous Vapi Server URL, if events must ALSO go there
+WEBHOOK_FORWARD_URL=

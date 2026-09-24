@@ -1,0 +1,53 @@
+// Control-panel Worker: serves the console (../vapi-control) and its API.
+// Secrets are NEVER stored here — see README.md "Required Cloudflare variables".
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kidletto-vapi-control",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+
+  // https://kidletto-vapi-control.<account-subdomain>.workers.dev/vapi-control/
+  "workers_dev": true,
+  // Preview URLs would be a second hostname; keep them off.
+  "preview_urls": false,
+  // Variables added in the Cloudflare dashboard (TEAM_DOMAIN, POLICY_AUD,
+  // ALLOWED_EMAILS, VAPI_ASSISTANT_ID) survive `wrangler deploy`.
+  "keep_vars": true,
+
+  // Once kidletto.com is served through Cloudflare, add the narrow route:
+  // "routes": [{ "pattern": "kidletto.com/vapi-control*", "zone_name": "kidletto.com" }],
+
+  "assets": {
+    "directory": "../vapi-control",
+    "binding": "ASSETS",
+    // Every request (static files too) goes through the Worker's Access check.
+    "run_worker_first": true
+  },
+
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "CallHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CallHub"] }],
+
+  "vars": {
+    // Extra origins allowed to call the API cross-origin (exact match, no wildcards).
+    "ALLOWED_ORIGINS": "https://kidletto.com",
+
+    // Cloudflare Access. Neither value is a secret: both appear in the public
+    // login redirect. Several team names may be listed, comma separated — but
+    // list only names that actually serve /cdn-cgi/access/certs, since every
+    // entry is a trusted source of signing keys.
+    "TEAM_DOMAIN": "https://kidletto.cloudflareaccess.com",
+    // AUD tag of the Access application "kidletto-vapi-control - Cloudflare
+    // Workers". Recreating that application issues a NEW tag and logins then
+    // fail with "wrong audience" — read the fresh value from the `kid`
+    // parameter of the login redirect and update it here.
+    "POLICY_AUD": "9cf2a994daa261f6f0f33ae08823393a5691fb9a6030d21e38b8414d796ce66f",
+    // Independent allowlist, enforced by the Worker on top of the Access policy.
+    "ALLOWED_EMAILS": "geofakt@gmail.com"
+  },
+
+  // Structured logs from the code only. Automatic invocation logs are off:
+  // they would store request headers (Access JWT / webhook credential).
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": false } }
+}
