@@ -349,7 +349,10 @@ export class CallHub extends DurableObject {
   }
 
   async pushAll(message, { only, topic, ttl = 120 } = {}) {
-    if (!pushConfigured(this.env)) return { sent: 0, failed: 0, removed: 0, configured: false };
+    if (!pushConfigured(this.env)) {
+      log("push_not_configured", { kind: message.type });
+      return { sent: 0, failed: 0, removed: 0, configured: false, results: [] };
+    }
     let subs = await this.pushSubscriptions();
     if (only) {
       const key = PUSH_PREFIX + (await subscriptionId(only));
@@ -363,7 +366,14 @@ export class CallHub extends DurableObject {
         await this.ctx.storage.delete(r.key);
       }
     }
-    const summary = { sent: results.filter((r) => r.ok).length, failed: results.filter((r) => !r.ok).length, removed, configured: true };
+    const summary = {
+      sent: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      removed,
+      configured: true,
+      // What each push service answered (host + HTTP status), for the console's test button.
+      results: results.map((r) => ({ host: r.host, status: r.status, error: r.error || null })),
+    };
     log("push_sent", {
       kind: message.type,
       callId: message.callId || null,

@@ -25,6 +25,39 @@ export class Recorder {
     this.startedAt = 0;
     this.limitTimer = null;
     this.done = null;
+    // Input level, to show the operator the microphone hears them and to
+    // catch a microphone that only delivers silence (Android does that to
+    // every other app during a phone call).
+    this.meter = null; // { ctx, analyser, buf, timer }
+    this.level = 0;
+    this.peak = 0;
+  }
+
+  startMeter() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx();
+      ctx.resume().catch(() => {});
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      ctx.createMediaStreamSource(this.stream).connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      const timer = setInterval(() => {
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (const v of buf) sum += v * v;
+        this.level = Math.sqrt(sum / buf.length);
+        this.peak = Math.max(this.peak, this.level);
+      }, 100);
+      this.meter = { ctx, timer };
+    } catch {
+      this.meter = null; // no Web Audio: no meter, recording still works
+    }
+  }
+
+  // True once enough was recorded to judge, and nothing above near-silence arrived.
+  heardOnlySilence() {
+    return Boolean(this.meter) && this.peak < 0.002;
   }
 
   get recording() {
@@ -56,6 +89,8 @@ export class Recorder {
     // A timeslice keeps data flowing, so a long take is not lost at stop.
     this.recorder.start(500);
     this.startedAt = Date.now();
+    this.peak = 0;
+    this.startMeter();
     this.limitTimer = setTimeout(() => this.onLimit?.(), this.maxMs);
   }
 
@@ -83,6 +118,11 @@ export class Recorder {
   }
 
   release() {
+    if (this.meter) {
+      clearInterval(this.meter.timer);
+      this.meter.ctx.close().catch(() => {});
+      this.meter = null;
+    }
     for (const track of this.stream?.getTracks() || []) track.stop();
     this.stream = null;
     this.recorder = null;

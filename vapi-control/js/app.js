@@ -142,6 +142,8 @@ const el = {
   micLabel: $("micLabel"),
   micCancel: $("micCancel"),
   micStatus: $("micStatus"),
+  micLevel: $("micLevel"),
+  micLevelBar: $("micLevelBar"),
   autoSendDictation: $("autoSendDictation"),
   lastLine: $("lastLine"),
   editPhrases: $("editPhrases"),
@@ -584,9 +586,16 @@ async function sendTestAlert() {
     return;
   }
   try {
-    const res = await api.pushTest(sub.endpoint);
+    let res = await api.pushTest(sub.endpoint);
+    // The server does not know this device (yet): register it and try once more.
+    if (res.configured !== false && (res.results || []).length === 0) {
+      await enablePush(api, state.swReg, state.pushKey);
+      res = await api.pushTest(sub.endpoint);
+    }
+    const answer = (res.results || []).map((r) => `${r.host}: ${r.status ? `HTTP ${r.status}` : r.error || "no answer"}`).join(", ");
     if (res.sent > 0) toast("Test alert sent — it should appear in a few seconds. Close the console to see it arrive without it.", "ok", 7000);
-    else toast("The push service refused the test alert. Turn alerts off and on again.", "error", 8000);
+    else if (res.configured === false) toast("Push alerts are not configured on the server (VAPID keys).", "error", 9000);
+    else toast(`The test alert was not delivered (${answer || "this device is not registered"}). Turn alerts off and on again.`, "error", 10000);
   } catch (error) {
     toast(`Test alert failed: ${error.message}`, "error", 8000);
   }
@@ -919,11 +928,20 @@ async function finishDictation() {
   clearInterval(d.timer);
   const recorder = d.recorder;
   const tooShort = recorder.elapsedMs() < 600;
+  const silent = recorder.heardOnlySilence();
   d.recorder = null;
   setDictation("working", "Recognizing…");
   const blob = await recorder.stop().catch(() => null);
   if (tooShort || !blob || blob.size < 800) {
     setDictation("idle", "Too short — tap DICTATE, speak, then tap again to send.", true);
+    return;
+  }
+  if (silent) {
+    setDictation(
+      "idle",
+      "The microphone delivered only silence. On a phone this happens during a regular phone call: Android and iOS give the microphone to the call and other apps get silence. Dictate from another device, or end the phone call.",
+      true,
+    );
     return;
   }
   let heard = "";
@@ -1195,6 +1213,8 @@ function renderDictation() {
   el.micBtn.classList.toggle("working", d.phase === "starting" || d.phase === "working");
   el.micBtn.setAttribute("aria-pressed", String(recording));
   el.micCancel.hidden = !recording;
+  el.micLevel.hidden = !recording || !d.recorder?.meter;
+  if (recording) el.micLevelBar.style.width = `${Math.min(100, Math.round((d.recorder?.level || 0) * 600))}%`;
   if (recording) {
     const s = Math.floor((d.recorder?.elapsedMs() || 0) / 1000);
     const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;

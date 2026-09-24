@@ -231,7 +231,8 @@ async function handleApi(request, env, identity, subpath) {
       if (!pushConfigured(env)) throw new HttpError(503, "push_not_configured", "Push alerts are not configured on the Worker (VAPID keys).");
       const endpoint = typeof body.endpoint === "string" && body.endpoint ? body.endpoint : undefined;
       const res = await hubCall(env, "/__hub/push/test", { endpoint });
-      return json({ ok: true, sent: res.sent, failed: res.failed, removed: res.removed });
+      log("push_test", { sent: res.sent, failed: res.failed, configured: res.configured, results: res.results, by: identity.email });
+      return json({ ok: true, sent: res.sent, failed: res.failed, removed: res.removed, configured: res.configured, results: res.results || [] });
     }
     throw new HttpError(404, "not_found", "Unknown API endpoint.");
   }
