@@ -37,7 +37,7 @@ const DEFAULTS = {
   operatorMode: { useMute: true, enterText: "", leaveText: "" },
   aiInstruction: { template: "{instruction}", clearAfterSend: true },
   quickPhrases: [],
-  dtmf: { pauseBetweenDigits: "w", sendOnPress: false, maxLength: 32 },
+  dtmf: { pauseBetweenDigits: "w", sendOnPress: false, autoSendAfterMs: 1200, confirmWithinSeconds: 12, maxLength: 32 },
   listen: { defaultFormat: "auto", volume: 1, autoStart: true },
 };
 
@@ -714,6 +714,7 @@ const events = new EventsClient({
       renderTranscript();
       // Operator mode may have been switched from another device.
       if (msg.type === "state" || msg.type === "snapshot") {
+        checkDtmfWatch();
         renderMode();
         renderControls();
       }
@@ -978,11 +979,61 @@ function dtmfSequence(keys) {
   return pause ? keys.split("").join(pause) : keys;
 }
 
-async function sendDtmf(keys) {
-  if (!keys) return;
-  const ok = await command("dtmf", (id) => api.dtmf(id, dtmfSequence(keys)), `DTMF ${keys} sent to the assistant's dtmf tool.`);
-  if (ok && !cfg.dtmf.sendOnPress) state.dtmf = "";
+// Keys pile up while the operator types and go out together a moment after
+// the last press (or at once with SEND DTMF): one tool call per sequence.
+function queueDtmf(key) {
+  if (state.dtmf.length < (cfg.dtmf.maxLength || 32)) state.dtmf += key;
+  clearTimeout(state.dtmfTimer);
+  const ms = Number(cfg.dtmf.autoSendAfterMs) || 0;
+  if (ms > 0) state.dtmfTimer = setTimeout(flushDtmf, ms);
   renderControls();
+}
+
+async function flushDtmf() {
+  clearTimeout(state.dtmfTimer);
+  if (state.busy.has("dtmf")) {
+    state.dtmfTimer = setTimeout(flushDtmf, 300);
+    return;
+  }
+  const keys = state.dtmf;
+  if (!keys) return;
+  state.dtmf = "";
+  const ok = await sendDtmf(keys);
+  if (!ok) state.dtmf = keys + state.dtmf; // keep them for another try
+  renderControls();
+}
+
+const isDtmfToolLine = (m) => m.role === "tool" && /\bdtmf\b/i.test(m.text);
+
+async function sendDtmf(keys) {
+  if (!keys) return false;
+  const callId = state.selectedId;
+  const before = (store.calls.get(callId)?.messages || []).filter(isDtmfToolLine).length;
+  const ok = await command("dtmf", (id) => api.dtmf(id, dtmfSequence(keys)), `Keys ${keys} passed to the assistant — waiting for it to press them…`);
+  renderControls();
+  if (!ok) return false;
+  // Vapi cannot send operator DTMF itself; the model has to call its dtmf
+  // tool. Watch the call log for that tool call and tell the operator.
+  clearTimeout(state.dtmfWatch?.timer);
+  const watch = { callId, keys, before, timer: null };
+  watch.timer = setTimeout(() => {
+    if (state.dtmfWatch !== watch) return;
+    state.dtmfWatch = null;
+    toast(`The assistant did not press ${keys}: no dtmf tool call appeared in the call log. Try again — Vapi can send tones only through the assistant's own dtmf tool.`, "error", 12000);
+  }, (Number(cfg.dtmf.confirmWithinSeconds) || 12) * 1000);
+  state.dtmfWatch = watch;
+  checkDtmfWatch();
+  return true;
+}
+
+function checkDtmfWatch() {
+  const watch = state.dtmfWatch;
+  if (!watch) return;
+  const count = (store.calls.get(watch.callId)?.messages || []).filter(isDtmfToolLine).length;
+  if (count <= watch.before) return;
+  clearTimeout(watch.timer);
+  state.dtmfWatch = null;
+  toast(`✓ The assistant pressed ${watch.keys}.`, "ok", 4000);
 }
 
 function openEndDialog() {
@@ -1177,7 +1228,8 @@ function renderControls() {
 
   const dtmfTool = Boolean(state.caps?.dtmf?.viaAssistantTool);
   const dtmfEnabled = control && dtmfTool;
-  for (const btn of el.keypad.querySelectorAll("button")) btn.disabled = !dtmfEnabled || state.busy.has("dtmf");
+  // Keys stay usable while a sequence is being sent: new ones queue up.
+  for (const btn of el.keypad.querySelectorAll("button")) btn.disabled = !dtmfEnabled;
   el.dtmfClear.disabled = !dtmfEnabled || !state.dtmf;
   el.dtmfSend.disabled = !dtmfEnabled || !state.dtmf || state.busy.has("dtmf");
   el.dtmfSend.hidden = Boolean(cfg.dtmf.sendOnPress);
@@ -1187,7 +1239,7 @@ function renderControls() {
   el.dtmfNote.textContent = !call
     ? ""
     : dtmfTool
-      ? "Vapi has no operator DTMF command. These keys are passed to the assistant's built-in dtmf tool, which sends real DTMF (RFC 2833); the model performs the key press."
+      ? `Keys go out ${Number(cfg.dtmf.autoSendAfterMs) > 0 ? `${(cfg.dtmf.autoSendAfterMs / 1000).toFixed(1)} s after the last press (or with SEND DTMF)` : "with SEND DTMF"}. Vapi has no operator DTMF command, so the assistant's dtmf tool presses them — takes a few seconds; the console confirms when it happened.`
       : "Vapi's live call control API cannot send operator DTMF. To enable this keypad, add Vapi's built-in DTMF tool to the assistant (see README).";
 }
 
@@ -1512,14 +1564,14 @@ function bindUi() {
       sendDtmf(key);
       return;
     }
-    if (state.dtmf.length < (cfg.dtmf.maxLength || 32)) state.dtmf += key;
-    renderControls();
+    queueDtmf(key);
   });
   el.dtmfClear.addEventListener("click", () => {
+    clearTimeout(state.dtmfTimer);
     state.dtmf = "";
     renderControls();
   });
-  el.dtmfSend.addEventListener("click", () => sendDtmf(state.dtmf));
+  el.dtmfSend.addEventListener("click", flushDtmf);
 
   el.endCallBtn.addEventListener("click", openEndDialog);
   el.endCancel.addEventListener("click", closeEndDialog);

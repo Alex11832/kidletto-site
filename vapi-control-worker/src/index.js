@@ -429,8 +429,12 @@ async function handleApi(request, env, identity, subpath) {
       );
     }
     const payload = { type: "add-message", message: { role: "system", content: dtmfInstruction(keys) }, triggerResponseEnabled: true };
+    // In operator mode the assistant is muted; unmute it for the key press
+    // like for a spoken line (tones may travel on its audio), then re-mute.
+    const unmute = await beginOperatorLine(env, callId, lineEstimateMs(keys.length * 4, { viaModel: true }));
     // Digits can be PINs: only their count is logged.
-    return sendControl(client, env, call, payload, "dtmf_requested", { keyCount: keys.replace(/[wW]/g, "").length, by: identity.email });
+    await speakOperatorLine(client, env, call, unmute, payload, "dtmf_requested", { keyCount: keys.replace(/[wW]/g, "").length, by: identity.email });
+    return json({ ok: true, callId: call.id });
   }
 
   if (action === "end") {

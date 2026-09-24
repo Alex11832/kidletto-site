@@ -516,6 +516,21 @@ await check("SAY & HANG UP: speaks, then the call ends by itself -> NO ACTIVE CA
   const d = await waitControl(1);
   assert.ok(d.payload.message.content.includes('keys "1w2w#"'));
   await until(`document.getElementById('dtmfDisplay').textContent === ''`);
+  // The console confirms once the assistant's dtmf tool call shows up in the call log.
+  await webhook({
+    type: "conversation-update",
+    call: { id: C3 },
+    timestamp: Date.now(),
+    messages: [{ role: "tool_calls", toolCalls: [{ function: { name: "dtmf", arguments: '{"keys":"1w2w#"}' } }], time: Date.now() }],
+  });
+  await until(`[...document.querySelectorAll('#toasts .toast')].some(t => t.textContent.includes('The assistant pressed 12#'))`, { what: "DTMF confirmation" });
+  // Keys typed without SEND go out by themselves a moment after the last press.
+  await js(`document.querySelector('#keypad button[data-key="9"]').click()`);
+  await js(`document.querySelector('#keypad button[data-key="0"]').click()`);
+  const auto = await waitControl(2, 4000);
+  assert.ok(auto.payload.message.content.includes('keys "9w0"'));
+  await until(`document.getElementById('dtmfDisplay').textContent === ''`);
+  mock.state.controls.length = 1;
   // Russian goodbye: translated first, then spoken with the hang-up.
   mock.state.ai.translations["Ладно, я подумаю. Пока."] = "Okay, I'll think about it. Bye.";
   await typeInto("sayText", "Ладно, я подумаю. Пока.");

@@ -135,6 +135,12 @@ window.VAPI_CONTROL_CONFIG = {
     pauseBetweenDigits: "w",
     // Send every key immediately instead of building a sequence.
     sendOnPress: false,
+    // Keys typed in a row go out together this long after the last press
+    // (0 = only with SEND DTMF). One tool call per sequence is faster and
+    // more reliable than one per key.
+    autoSendAfterMs: 1200,
+    // Warn if the assistant has not called its dtmf tool within this time.
+    confirmWithinSeconds: 12,
     maxLength: 32,
   },
 

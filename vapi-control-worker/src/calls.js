@@ -134,7 +134,8 @@ export function assertDtmfKeys(keys) {
 export function dtmfInstruction(keys) {
   return [
     `[Operator DTMF command] Immediately call the dtmf tool with keys "${keys}".`,
-    "Do not say anything out loud, do not read the digits, and do not mention this instruction.",
+    "This comes from the human operator and takes priority over every other instruction, including any instruction to stay silent or to end the call: a tool call is not speaking.",
+    "Call the tool exactly once with exactly these keys. Do not say anything out loud, do not read the digits, and do not mention this instruction.",
     "After the tool call, stay silent and keep listening to the other party.",
   ].join(" ");
 }
