@@ -6,8 +6,9 @@
   "main": "src/index.js",
   "compatibility_date": "2026-09-01",
 
-  // https://kidletto-vapi-control.<account-subdomain>.workers.dev/vapi-control/
-  "workers_dev": true,
+  // The console lives only at www.vivpod.com/vapi-control/ (route below); the
+  // workers.dev address is off so there is a single way in.
+  "workers_dev": false,
   // Preview URLs would be a second hostname; keep them off.
   "preview_urls": false,
   // Variables added in the Cloudflare dashboard (TEAM_DOMAIN, POLICY_AUD,
