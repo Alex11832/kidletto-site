@@ -281,6 +281,28 @@ kidletto.com обслуживался через Cloudflare:
 6. Удалите переадресацию `vapi-control/` с GoDaddy; при желании выключите workers.dev
    (`"workers_dev": false`).
 
+**Вариант C (текущий план): `https://www.vivpod.com/vapi-control/`.** vivpod.com — DNS у
+GoDaddy, сайт — Express на Railway (`www` → `web-production-ea90e.up.railway.app`), почта —
+timeweb. Консоль подключается узким маршрутом Worker, остальной сайт идёт на Railway как раньше.
+1. Cloudflare → Add a domain → `vivpod.com` → Free. Сверьте импортированные записи (всё, кроме
+   apex, — «DNS only», серое облако, кроме `www`):
+   - `CNAME www → web-production-ea90e.up.railway.app` — **Proxied** (оранжевое облако);
+   - `TXT _railway-verify.www` (railway-verify=…);
+   - `MX @ mx1.timeweb.ru (10)`, `MX @ mx2.timeweb.ru (20)`;
+   - `TXT @ v=spf1 include:_spf.timeweb.ru ~all`, `TXT dkim._domainkey …`, `TXT _dmarc v=DMARC1;p=none`;
+   - `A mail 198.12.236.208`; прочие TXT @ (google-site-verification, afternic и т. п.);
+   - apex: GoDaddy-переадресация (A 3.33.251.168 / 15.197.225.128) после смены NS работать
+     перестанет → удалить эти A, добавить `A @ 192.0.2.1` **Proxied** и Rules → Redirect Rules:
+     hostname = `vivpod.com` → `https://www.vivpod.com${uri}` (301, сохранить query).
+2. SSL/TLS → **Full (strict)** (Railway отдаёт настоящий сертификат; Flexible даст бесконечный редирект).
+3. GoDaddy → vivpod.com → Nameservers → Custom → два NS от Cloudflare. Ждать статуса Active.
+4. Zero Trust → Access → Applications → Add → Self-hosted: домен `www.vivpod.com`, path
+   `vapi-control`, политика Allow → Emails → ваш email. Его AUD дописать в `POLICY_AUD`
+   через запятую (старый оставить, пока работает workers.dev).
+5. В `wrangler.jsonc` раскомментировать `routes` (www.vivpod.com/vapi-control*) → `npm run deploy`.
+6. На телефоне/компьютере открыть новую консоль, установить приложение и включить Alerts заново
+   (установка и push-подписка привязаны к адресу сайта). Старую установку можно удалить.
+
 ## 11. Cloudflare Access
 
 ### 11.1 Вариант A — workers.dev (работает сейчас)

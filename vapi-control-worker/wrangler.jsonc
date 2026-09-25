@@ -14,8 +14,11 @@
   // ALLOWED_EMAILS, VAPI_ASSISTANT_ID) survive `wrangler deploy`.
   "keep_vars": true,
 
-  // Once kidletto.com is served through Cloudflare, add the narrow route:
-  // "routes": [{ "pattern": "kidletto.com/vapi-control*", "zone_name": "kidletto.com" }],
+  // www.vivpod.com/vapi-control/ — the console's own address once the
+  // vivpod.com zone is active in Cloudflare (README §10, variant C). The
+  // route is narrow: every other vivpod.com page still goes to Railway.
+  // Uncomment only after the zone is active, or the deploy fails.
+  // "routes": [{ "pattern": "www.vivpod.com/vapi-control*", "zone_name": "vivpod.com" }],
 
   "assets": {
     "directory": "../vapi-control",
@@ -36,7 +39,7 @@
 
   "vars": {
     // Extra origins allowed to call the API cross-origin (exact match, no wildcards).
-    "ALLOWED_ORIGINS": "https://kidletto.com",
+    "ALLOWED_ORIGINS": "https://kidletto.com, https://www.vivpod.com",
 
     // Cloudflare Access. Neither value is a secret: both appear in the public
     // login redirect. Several team names may be listed, comma separated — but
