@@ -618,9 +618,9 @@ await check("phone-width layout has no horizontal scroll", async () => {
   await sleep(400);
   const overflow = await js("document.documentElement.scrollWidth - document.documentElement.clientWidth");
   assert.ok(overflow <= 0, `horizontal overflow ${overflow}px`);
-  // Phone: dictation first, quick phrases next, then the transcript, the rest below.
+  // Phone: TAKE OVER first, dictation right below, quick phrases next, then the transcript, the rest below.
   const tops = await js(`Object.fromEntries(['sayGroup', 'phrasesGroup', 'modeGroup', 'audioGroup', 'endCallBtn'].map(id => [id, document.getElementById(id).getBoundingClientRect().top]).concat([['transcript', document.querySelector('.transcript-panel').getBoundingClientRect().top]]))`);
-  assert.ok(tops.sayGroup < tops.phrasesGroup && tops.phrasesGroup < tops.transcript && tops.transcript < tops.modeGroup && tops.modeGroup < tops.audioGroup && tops.audioGroup < tops.endCallBtn, JSON.stringify(tops));
+  assert.ok(tops.modeGroup < tops.sayGroup && tops.sayGroup < tops.phrasesGroup && tops.phrasesGroup < tops.transcript && tops.transcript < tops.audioGroup && tops.audioGroup < tops.endCallBtn, JSON.stringify(tops));
   const mic = await js("(() => { const r = document.getElementById('micBtn').getBoundingClientRect(); return { h: r.height, w: r.width }; })()");
   assert.ok(mic.h >= 56 && mic.w >= 300, `big thumb-sized DICTATE button: ${JSON.stringify(mic)}`);
   const shot = await send("Page.captureScreenshot", { format: "png" });

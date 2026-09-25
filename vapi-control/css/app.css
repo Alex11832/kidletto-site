@@ -296,11 +296,13 @@ input[type="range"] { flex: 1; accent-color: var(--accent); }
     padding: 10px 12px;
   }
   body.manual-mode .controls-panel > .group { box-shadow: inset 0 0 0 1px rgba(243, 178, 60, 0.35); }
+  /* Who is talking (TAKE OVER) first, right above the microphone. */
+  #modeGroup { order: 0; }
+  #modeGroup .note { display: none; }
   #sayGroup { order: 1; }
   #phrasesGroup { order: 2; }
   .transcript-panel { order: 3; height: 40vh; min-height: 220px; }
   .target { order: 4; }
-  #modeGroup { order: 5; }
   .btn.mic { padding: 20px 12px; font-size: 17px; }
   .btn.mic .mic-icon { width: 26px; height: 26px; }
   .phrases .btn { padding: 12px 10px; }
