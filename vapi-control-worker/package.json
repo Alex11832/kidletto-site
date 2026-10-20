@@ -1,0 +1,21 @@
+{
+  "name": "kidletto-vapi-control-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers backend for the private Vapi live call control panel (kidletto.com/vapi-control/).",
+  "scripts": {
+    "dev": "wrangler dev",
+    "dev:webhook": "wrangler dev -c wrangler.webhook.jsonc --port 8788",
+    "test": "npm run test:unit && npm run test:integration && npm run test:ui",
+    "test:unit": "node --test \"test/unit/*.test.mjs\"",
+    "test:integration": "node test/integration/run.mjs",
+    "test:ui": "node test/ui/run.mjs",
+    "check": "wrangler deploy --dry-run --outdir .wrangler/dry-run && wrangler deploy -c wrangler.webhook.jsonc --dry-run --outdir .wrangler/dry-run-webhook",
+    "deploy": "wrangler deploy && wrangler deploy -c wrangler.webhook.jsonc"
+  },
+  "devDependencies": {
+    "wrangler": "^4.137.0",
+    "ws": "^8.18.3"
+  }
+}

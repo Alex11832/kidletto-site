@@ -30,3 +30,7 @@ exclude:
   - vendor/cache/
   - vendor/gems/
   - vendor/ruby/
+  # Vapi control panel: served by its own Cloudflare Worker behind Cloudflare
+  # Access, never by the public Jekyll site.
+  - vapi-control/
+  - vapi-control-worker/

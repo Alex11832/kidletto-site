@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://kidletto.com/sitemap.xml
