@@ -1,5 +1,14 @@
 # Vapi Live Control — приватная операторская консоль
 
+### VIVpod CRM event mirror
+
+`POST /vapi/vivpod-events` accepts minimized live events from the VIVpod CRM,
+using the independent `VIVPOD_EVENTS_SECRET` bearer credential. It publishes to
+the existing private CallHub and never invokes `WEBHOOK_FORWARD_URL`. The legacy
+`/vapi/events` credential and forwarding behavior are unchanged. CRM remains the
+primary Vapi webhook for tools and call reports. Its deployment explicitly lists
+the assistant IDs permitted to use this owner's console; other tenants are excluded.
+
 Консоль для наблюдения за активными звонками существующего Vapi-ассистента
 (Deepgram Nova 3 → GPT-5 → xAI Ara) и ручного управления ими.
 Ассистент, его модель, голос и транскрайбер **не изменяются** этим проектом.

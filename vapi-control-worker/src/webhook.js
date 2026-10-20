@@ -19,6 +19,7 @@ import { sanitizeServerMessage } from "./events.js";
 import { log } from "./log.js";
 
 const PATH = "/vapi/events";
+const CRM_PATH = "/vapi/vivpod-events";
 // Must match INGEST_PATH in hub.js (not imported: hub.js depends on the
 // Durable Object runtime module, which this Worker does not need).
 const HUB_INGEST_PATH = "/__hub/ingest";
@@ -118,12 +119,14 @@ async function forward(env, request, raw) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    if (url.pathname !== PATH) return plain(404, "Not found");
+    if (url.pathname !== PATH && url.pathname !== CRM_PATH) return plain(404, "Not found");
+    const crmMirror = url.pathname === CRM_PATH;
     if (request.method !== "POST") return plain(405, "Method not allowed");
-    if (!env.VAPI_WEBHOOK_SECRET) return plain(503, "Webhook secret not configured");
+    const expectedSecret = crmMirror ? env.VIVPOD_EVENTS_SECRET : env.VAPI_WEBHOOK_SECRET;
+    if (!expectedSecret) return plain(503, "Webhook secret not configured");
 
-    if (!(await secretsMatch(providedSecret(request), env.VAPI_WEBHOOK_SECRET))) {
-      log("webhook_rejected", { ...rejectionDetail(request), expectedLength: String(env.VAPI_WEBHOOK_SECRET).length });
+    if (!(await secretsMatch(providedSecret(request), expectedSecret))) {
+      log("webhook_rejected", { ...rejectionDetail(request) });
       return plain(401, "Unauthorized");
     }
 
@@ -142,7 +145,9 @@ export default {
     // waitUntil, so an event is delivered before Vapi gets its answer.
     const hubTask = body ? publishToHub(env, body) : Promise.resolve();
 
-    if (env.WEBHOOK_FORWARD_URL) {
+    // CRM already handles tools/reports. Mirrored events must never loop back or
+    // duplicate the legacy forwarding integration.
+    if (!crmMirror && env.WEBHOOK_FORWARD_URL) {
       const forwarded = forward(env, request, raw).catch((error) => {
         log("webhook_forward_failed", { type: body?.message?.type || null, reason: error?.name || "unknown" });
         return plain(502, "Forwarding failed");
