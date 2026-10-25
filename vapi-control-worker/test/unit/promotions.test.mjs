@@ -23,7 +23,7 @@ test("valid Access owner reads the CRM flag and forwards only its verified asser
   assert.deepEqual(await response.json(), {ok: true, ...state()});
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, "https://www.vivpod.com/api/integrations/voice/promotions");
-  assert.equal(calls[0].init.redirect, "error");
+  assert.equal(calls[0].init.redirect, "manual");
   assert.equal(calls[0].init.method, "GET");
   assert.deepEqual(Object.keys(calls[0].init.headers), ["Cf-Access-Jwt-Assertion"]);
   assert.equal(calls[0].init.headers["Cf-Access-Jwt-Assertion"], token);
@@ -96,4 +96,18 @@ test("conflict and uncertain delivery never expose upstream errors or a made-up 
   await assert.rejects(proxyPromotions(request(token), env, identity, {fetchImpl: async () => {throw new Error("token secret");}}), {code: "discount_crm_unavailable"});
   await assert.rejects(proxyPromotions(request(token), env, identity, {fetchImpl: async () => new Response(JSON.stringify({enabled: true}))}), {code: "invalid_promotion_state"});
   assert.throws(() => promotionState(state({revision: 1.5})), {code: "invalid_promotion_state"});
+});
+
+test("CRM redirects are blocked without forwarding the Access assertion or following Location", async () => {
+  const token = await idp.sign(claims());
+  for (const status of [301, 302, 303, 307, 308]) {
+    let requests = 0;
+    await assert.rejects(proxyPromotions(request(token), env, {email: "owner@example.invalid"}, {fetchImpl: async (url, init) => {
+      requests++;
+      assert.equal(url, "https://www.vivpod.com/api/integrations/voice/promotions");
+      assert.equal(init.redirect, "manual");
+      return new Response(null, {status, headers: {Location: "https://untrusted.example.invalid/private-destination"}});
+    }}), error => error.code === "discount_crm_redirect" && !error.message.includes("untrusted.example.invalid"));
+    assert.equal(requests, 1);
+  }
 });
