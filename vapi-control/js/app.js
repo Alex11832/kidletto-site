@@ -21,6 +21,7 @@ import { applyHubMessage, createTranscriptStore, speakingRoles, transcriptView }
 import { callElapsedMs, clockTime, directionLabel, formatDuration, shortId, statusLabel } from "./format.js";
 import { Recorder, dictationSupported } from "./dictation.js";
 import { currentSubscription, disablePush, enablePush, isIos, isStandalone, pushSupported, registerServiceWorker } from "./push.js";
+import { createPromotionController } from "./promotions.js";
 
 const DEFAULTS = {
   apiBase: "api/",
@@ -124,6 +125,10 @@ const state = {
 if (!(state.audioFormatKey in FORMAT_PRESETS)) state.audioFormatKey = "auto";
 
 const el = {
+  applyPromotions: $("applyPromotions"),
+  promotionSummary: $("promotionSummary"),
+  promotionStatus: $("promotionStatus"),
+  refreshPromotions: $("refreshPromotions"),
   callState: $("callState"),
   callStateText: $("callStateText"),
   timer: $("timer"),
@@ -195,6 +200,17 @@ const el = {
   endConfirm: $("endConfirm"),
   toasts: $("toasts"),
 };
+
+const promotions = createPromotionController(api, renderPromotions);
+function renderPromotions() {
+  const view = promotions.state;
+  el.applyPromotions.checked = view.snapshot?.enabled === true;
+  el.applyPromotions.disabled = !promotions.canChange();
+  el.refreshPromotions.disabled = view.loading || view.saving;
+  el.promotionSummary.textContent = view.saving ? "Saving pricing and updating active calls…" : view.loading ? "Checking the saved discount setting…" : !view.verified ? "Discount status could not be confirmed." : !view.snapshot.configured ? "Set discounted prices in the CRM first." : `${view.snapshot.enabled ? "Discounted prices only" : "Standard prices"} · ${view.snapshot.priceCount} discounted services · same setting in CRM`;
+  el.promotionStatus.textContent = view.error || view.notice;
+  el.promotionStatus.dataset.state = view.error ? "error" : view.warning ? "warning" : "saved";
+}
 
 // ---------------------------------------------------------------- helpers --
 
@@ -329,6 +345,7 @@ function selectCall(id) {
   closeEndDialog();
   render();
   refreshCaps(true);
+  promotions.load();
 }
 
 async function refreshCaps(announce) {
@@ -1529,6 +1546,8 @@ function bindUi() {
     fetchCallById(callId);
   });
   el.modeBtn.addEventListener("click", toggleOperatorMode);
+  el.applyPromotions.addEventListener("change", () => { void promotions.change(el.applyPromotions.checked); });
+  el.refreshPromotions.addEventListener("click", () => { void promotions.load(); });
   // Any click or key press on the page unlocks sound for the session.
   document.addEventListener("pointerdown", unlockAudio, { capture: true });
   document.addEventListener("keydown", unlockAudio, { capture: true });
@@ -1592,9 +1611,10 @@ function bindUi() {
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) schedulePoll(0);
+    if (!document.hidden) { schedulePoll(0); promotions.load(); }
   });
   window.addEventListener("online", () => schedulePoll(0));
+  window.addEventListener("focus", () => { if (!document.hidden) promotions.load(); });
   window.addEventListener("offline", () => {
     state.pollError = "Network connection lost.";
     renderBanner();
@@ -1638,6 +1658,7 @@ async function init() {
   renderQuickPhrases();
   render();
   setInterval(tick, 250);
+  setInterval(() => { if (!document.hidden && document.hasFocus()) promotions.load(); }, 10000);
   tryAutoUnlock();
   try {
     const session = await api.session();
@@ -1659,6 +1680,7 @@ async function init() {
   render();
   poll();
   loadPhrases();
+  promotions.load();
 }
 
 // ----------------------------------------------------------- phrase editor --

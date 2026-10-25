@@ -60,6 +60,8 @@ export function createApi(baseUrl) {
 
   return {
     session: () => request("session"),
+    promotions: () => request("promotions"),
+    savePromotions: (enabled, expectedRevision) => request("promotions", { method: "POST", body: { enabled, expectedRevision } }),
     calls: () => request("calls"),
     call: (id, { select = false } = {}) => request(`${callPath(id)}${select ? "?select=1" : ""}`),
     say: (id, text, { endCallAfterSpoken = false, interruptAssistant = false, translate = false, language } = {}) =>
