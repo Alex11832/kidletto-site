@@ -347,7 +347,7 @@ await check("11. commands target exactly the requested call; wrong/ended/foreign
 await check("12. call detail exposes the real start time for the timer", async () => {
   const r = await api(`calls/${CALL_1}?select=1`);
   assert.equal(r.json.call.startedAt, mock.state.calls.get(CALL_1).startedAt);
-  assert.ok(main.logs.some((l) => l.includes('"evt":"call_selected"') && l.includes(CALL_1)));
+  await waitFor(() => main.logs.some((l) => l.includes('"evt":"call_selected"') && l.includes(CALL_1)), { what: "selected-call audit log" });
 });
 
 // ---------------------------------------------------- commands 18-24 ---

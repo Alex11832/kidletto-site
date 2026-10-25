@@ -51,6 +51,7 @@ import {
 } from "./calls.js";
 import { createVapiClient } from "./vapi.js";
 import { log } from "./log.js";
+import { proxyPromotions } from "./promotions.js";
 
 export { CallHub } from "./hub.js";
 
@@ -177,6 +178,8 @@ async function speakOperatorLine(client, env, call, unmute, payload, event, fiel
 
 async function handleApi(request, env, identity, subpath) {
   const method = request.method;
+
+  if (subpath === "/promotions") return proxyPromotions(request, env, identity);
 
   if (subpath === "/session" && method === "GET") {
     return json({

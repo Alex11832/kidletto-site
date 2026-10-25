@@ -40,6 +40,14 @@
 
   <div class="banner" id="banner" role="status" hidden></div>
 
+  <section class="promotions-bar" aria-label="Assistant discounts">
+    <label class="check promotion-choice"><input type="checkbox" id="applyPromotions" disabled> Apply discounts</label>
+    <span class="promotion-summary" id="promotionSummary">Loading saved discount setting…</span>
+    <button type="button" class="link" id="refreshPromotions">Refresh</button>
+    <a class="link" href="/dashboard/agents" target="_blank" rel="noopener">Edit discounted prices in CRM ↗</a>
+    <p class="promotion-status" id="promotionStatus" role="status" aria-live="polite"></p>
+  </section>
+
   <section class="call-list" id="callList" hidden aria-label="Active calls">
     <div class="section-title">ACTIVE CALLS <span class="hint" id="callListHint"></span></div>
     <div class="call-rows" id="callRows"></div>
