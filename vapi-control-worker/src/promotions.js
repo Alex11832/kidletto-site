@@ -75,9 +75,15 @@ export async function proxyPromotions(request, env, identity, { fetchImpl = fetc
   const headers = { "Cf-Access-Jwt-Assertion": assertion, ...(body ? { "Content-Type": "application/json", Origin: new URL(CRM_PROMOTIONS_URL).origin } : {}) };
   let response;
   try {
-    response = await fetchImpl(CRM_PROMOTIONS_URL, { method: request.method, headers, ...(body ? { body } : {}), redirect: "error", signal: AbortSignal.timeout(20000) });
+    // workerd supports only manual/follow; redirect:"error" throws before any
+    // network request. Keep the assertion on this one pinned endpoint only.
+    response = await fetchImpl(CRM_PROMOTIONS_URL, { method: request.method, headers, ...(body ? { body } : {}), redirect: "manual", signal: AbortSignal.timeout(20000) });
   } catch {
     throw new HttpError(502, "discount_crm_unavailable", "Could not confirm the saved discount setting. Refresh before trying again.");
+  }
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => {});
+    throw new HttpError(502, "discount_crm_redirect", "The CRM discount endpoint redirected. The redirected address was not contacted; open the CRM to review the connection.");
   }
   if (!response.ok) {
     const status = [400, 401, 403, 409, 503].includes(response.status) ? response.status : 502;
